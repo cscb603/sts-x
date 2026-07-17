@@ -15,3 +15,6 @@
 *.dSYM
 *.o
 *.so
+
+# Release packages
+sts-x-win*
