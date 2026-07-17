@@ -1,0 +1,73 @@
+[package]
+name = "sts-x"
+version = "0.1.0"
+edition = "2021"
+description = "STS-X: 下一代 AI 代码搜索引擎 — AST 感知切块 + BM25 全文搜索 + MCP 服务，17MB 单二进制零依赖"
+authors = ["xtap"]
+homepage = "https://github.com/xtap/sts-x"
+repository = "https://github.com/xtap/sts-x"
+license = "MIT"
+keywords = ["code-search", "ast", "bm25", "mcp", "ai-search-engine"]
+categories = ["command-line-utilities", "development-tools", "search"]
+readme = "README.md"
+
+[features]
+default = []
+semantic = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+
+[dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+
+# Async & HTTP
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# AST chunking
+tree-sitter = "=0.21.0"
+tree-sitter-rust = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-javascript = "0.21"
+tree-sitter-typescript = "0.21"
+tree-sitter-java = "0.21"
+tree-sitter-c = "0.21"
+tree-sitter-cpp = "0.21"
+ignore = "0.4"
+
+# Path diff
+pathdiff = "0.2"
+
+# Full-text search
+tantivy = "0.22"
+
+# ONNX inference (optional — for semantic search)
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"], optional = true }
+ndarray = { version = "0.16", optional = true }
+tokenizers = { version = "0.21", optional = true }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lib]
+name = "sts_x"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sts-x"
+path = "src/main.rs"
+
+[build-dependencies]
+embed-resource = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

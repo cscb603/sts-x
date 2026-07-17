@@ -1,0 +1,17 @@
+/target
+.stsx-index
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.idea
+.vscode
+*.iml
+
+# Build artifacts
+*.dSYM
+*.o
+*.so
