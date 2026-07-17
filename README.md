@@ -13,7 +13,7 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/macOS-支持-brightgreen?logo=apple">
-    <img src="https://img.shields.io/badge/Windows-开发中-yellow?logo=windows">
+    <img src="https://img.shields.io/badge/Windows-支持-blue?logo=windows">
     <img src="https://img.shields.io/badge/Linux-计划中-lightgrey?logo=linux">
     <img src="https://img.shields.io/badge/license-MIT-blue">
     <img src="https://img.shields.io/badge/大小-17MB-blue">
@@ -38,13 +38,19 @@ STS-X 是一个专为 **AI Agent** 设计的代码搜索引擎。与 IDE 内置�
 
 ### 下载
 
-从 [Releases](https://github.com/xtap/sts-x/releases) 下载最新版：
+从 [Releases](https://github.com/cscb603/sts-x/releases) 下载最新版：
 
 ```bash
 # macOS 版
-wget https://github.com/xtap/sts-x/releases/latest/download/sts-x-macos
+wget https://github.com/cscb603/sts-x/releases/latest/download/sts-x-macos
 chmod +x sts-x-macos
 sudo cp sts-x-macos /usr/local/bin/sts-x
+```
+
+```powershell
+# Windows 版（PowerShell）
+curl -L https://github.com/cscb603/sts-x/releases/latest/download/sts-x.exe -o sts-x.exe
+# 或直接下载 exe 文件放入任意目录
 ```
 
 ### 索引项目
