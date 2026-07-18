@@ -11,10 +11,10 @@
  * - _ai_instructions field: always present, tells AI how to use results
  */
 
-use crate::types::{SearchResponse, SearchResult};
+use crate::types::{FileMatch, LocateMatch, SearchResponse, SearchResult};
 use serde::Serialize;
 
-const AI_HINT: &str = "I am STS-X, an AI-native code search engine. CLI: sts-x search \"q\" (code), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results count), --path /dir (project root). MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"top_k\":3,\"context_lines\":5} to /search. Response: abs_path+lines=read location, highlight_lines=exact matches, score=relevance, code=truncated snippet.";
+const AI_HINT: &str = "I am STS-X 3.0, an AI-native unified code+file search engine. CLI: sts-x search \"q\" (code, --expand full block default | --locate line-level grep-sized), sts-x file \"q\" [--path DIR] (filename+content, zero-index via rg), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results), --path DIR. MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"output_mode\":\"expand|locate\",\"top_k\":3} to /search; POST {\"query\":\"...\",\"path\":\"/abs/dir\",\"content\":true,\"top_k\":10} to /file. Response: abs_path+lines=read location, score=relevance. locate: each match is a line (grep-sized, ~130 tok) — need the full block? re-run with output_mode=expand on that symbol. expand: code=full block.";
 
 #[derive(Debug, Serialize)]
 pub struct AiSearchOutput {
@@ -87,6 +87,95 @@ impl From<SearchResult> for AiResultItem {
             summary: b.doc_comment,
             code: b.code,
             language: b.language,
+        }
+    }
+}
+
+// ─── 3.0 locate-mode output (grep-sized line hits) ───────────────
+// Deliberately minimal (file/line/context/score) — no abs_path, no
+// _ai_instructions — so a locate call stays ~130 tok, far below the
+// grep+Read flow. The AI expands a symbol via --expand when it needs more.
+#[derive(Debug, Serialize)]
+pub struct AiLocateOutput {
+    pub query: String,
+    pub mode: &'static str,
+    pub matches: Vec<AiLocateItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiLocateItem {
+    pub file: String,
+    pub line: usize,
+    pub context: String,
+    pub score: f32,
+}
+
+impl From<SearchResponse> for AiLocateOutput {
+    fn from(resp: SearchResponse) -> Self {
+        AiLocateOutput {
+            query: resp.query,
+            mode: "locate",
+            matches: resp.locate_matches.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<LocateMatch> for AiLocateItem {
+    fn from(m: LocateMatch) -> Self {
+        AiLocateItem {
+            file: m.file,
+            line: m.line,
+            context: m.context,
+            score: m.score,
+        }
+    }
+}
+
+// ─── 3.0 file-mode output (filename + content, zero-index) ─────────
+#[derive(Debug, Serialize)]
+pub struct AiFileOutput {
+    pub query: String,
+    pub mode: &'static str,
+    pub matches: Vec<AiFileItem>,
+    pub total_hits: usize,
+    pub search_time_ms: u64,
+    #[serde(rename = "_ai_instructions")]
+    pub _ai_instructions: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiFileItem {
+    pub path: String,
+    pub abs_path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub is_dir: bool,
+    pub matched_by: String,
+    pub line: usize,
+    pub context: String,
+}
+
+impl AiFileOutput {
+    pub fn from_matches(query: String, matches: Vec<FileMatch>, search_time_ms: u64) -> Self {
+        AiFileOutput {
+            query,
+            mode: "file",
+            matches: matches
+                .into_iter()
+                .map(|m| AiFileItem {
+                    path: m.path,
+                    abs_path: m.abs_path,
+                    size: m.size,
+                    mtime: m.mtime,
+                    is_dir: m.is_dir,
+                    matched_by: m.matched_by,
+                    line: m.line,
+                    context: m.context,
+                })
+                .collect(),
+            total_hits: 0, // filled by caller (matches are built already)
+            search_time_ms,
+            _ai_instructions: AI_HINT,
         }
     }
 }

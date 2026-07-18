@@ -1,13 +1,13 @@
 [package]
 name = "sts-x"
-version = "0.2.1"
+version = "3.0.0"
 edition = "2021"
-description = "STS-X: 下一代 AI 代码搜索引擎 — AST 感知切块 + BM25 全文搜索 + MCP 服务，17MB 单二进制零依赖"
+description = "STS-X 3.0: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
 authors = ["xtap"]
 homepage = "https://github.com/cscb603/sts-x"
 repository = "https://github.com/cscb603/sts-x"
 license = "MIT"
-keywords = ["code-search", "ast", "bm25", "mcp", "ai-search-engine"]
+keywords = ["code-search", "ast", "bm25", "mcp", "ai-search-engine", "file-search"]
 categories = ["command-line-utilities", "development-tools", "search"]
 readme = "README.md"
 

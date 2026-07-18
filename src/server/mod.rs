@@ -15,7 +15,7 @@ use crate::indexer::SearchIndex;
 use crate::postprocess;
 use crate::search::SearchEngine;
 use crate::types::{IndexConfig, SearchMode, SearchQuery};
-use crate::types::format::AiSearchOutput;
+use crate::types::format::{AiFileOutput, AiLocateOutput, AiSearchOutput};
 use crate::cache;
 use axum::{
     extract::State,
@@ -39,6 +39,35 @@ pub struct AppState {
     default_index_path: Option<PathBuf>,
 }
 
+/// Unified search response (expand or locate JSON shape).
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum AiResponse {
+    Expand(AiSearchOutput),
+    Locate(AiLocateOutput),
+}
+
+/// Body for the MCP `/file` endpoint.
+#[derive(serde::Deserialize)]
+struct FileQuery {
+    query: String,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default = "default_content")]
+    content: bool,
+    #[serde(default = "default_topk_file")]
+    top_k: usize,
+    #[serde(default)]
+    name_only: bool,
+}
+
+fn default_content() -> bool {
+    true
+}
+fn default_topk_file() -> usize {
+    20
+}
+
 pub async fn serve(default_root: &Path, custom_index: Option<&PathBuf>, host: &str, port: u16) -> anyhow::Result<()> {
     let root = cache::detect_project_root(default_root);
     let state = Arc::new(AppState {
@@ -49,6 +78,7 @@ pub async fn serve(default_root: &Path, custom_index: Option<&PathBuf>, host: &s
 
     let app = Router::new()
         .route("/search", post(handle_search))
+        .route("/file", post(handle_file))
         .route("/health", get(handle_health))
         .route("/tools", get(handle_tools))
         .route("/", get(handle_root))
@@ -120,7 +150,7 @@ async fn get_or_create_engine(
 async fn handle_search(
     State(state): State<Arc<AppState>>,
     Json(query): Json<SearchQuery>,
-) -> Json<AiSearchOutput> {
+) -> Json<AiResponse> {
     let project_path = query.path.clone();
     let mode = if query.filename {
         SearchMode::Filename
@@ -134,14 +164,14 @@ async fn handle_search(
         Ok(k) => k,
         Err(e) => {
             tracing::error!("Failed to get engine: {:?}", e);
-            return Json(AiSearchOutput {
+            return Json(AiResponse::Expand(AiSearchOutput {
                 query: query.query.clone(),
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
                 _ai_instructions: "error: failed to initialize search engine",
-            });
+            }));
         }
     };
 
@@ -149,14 +179,14 @@ async fn handle_search(
     let pe = match engines.get_mut(&key) {
         Some(pe) => pe,
         None => {
-            return Json(AiSearchOutput {
+            return Json(AiResponse::Expand(AiSearchOutput {
                 query: query.query.clone(),
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
                 _ai_instructions: "error: engine not found",
-            });
+            }));
         }
     };
 
@@ -165,30 +195,69 @@ async fn handle_search(
     if search_query.top_k == 0 {
         search_query.top_k = 3;
     }
-    if search_query.context_lines == 0 {
-        search_query.context_lines = 5;
-    }
+    // 3.0: expand default = full block (context_lines 0). Do NOT force 5.
 
     let context_lines = search_query.context_lines;
     let query_str = search_query.query.clone();
+    let is_locate = matches!(search_query.output_mode, crate::types::OutputMode::Locate);
 
     match pe.engine.search(search_query) {
         Ok(mut resp) => {
-            postprocess::post_process_results(&mut resp, &query_str, context_lines);
-            Json(resp.into())
+            if is_locate {
+                Json(AiResponse::Locate(resp.into()))
+            } else {
+                postprocess::post_process_results(&mut resp, &query_str, context_lines);
+                Json(AiResponse::Expand(resp.into()))
+            }
         }
         Err(e) => {
             tracing::error!("Search error: {:?}", e);
-            Json(AiSearchOutput {
+            Json(AiResponse::Expand(AiSearchOutput {
                 query: query_str,
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
                 _ai_instructions: "error: search failed",
-            })
+            }))
         }
     }
+}
+
+async fn handle_file(
+    State(_state): State<Arc<AppState>>,
+    Json(body): Json<FileQuery>,
+) -> Json<AiFileOutput> {
+    let dir = match &body.path {
+        Some(p) => p.clone(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    let start = std::time::Instant::now();
+    let effective_name_only = body.name_only || !body.content;
+    let matches = match crate::filesearch::search_files(
+        &body.query,
+        &dir,
+        effective_name_only,
+        body.top_k,
+        true,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!("file search error: {:?}", e);
+            return Json(AiFileOutput {
+                query: body.query,
+                mode: "file",
+                matches: Vec::new(),
+                total_hits: 0,
+                search_time_ms: 0,
+                _ai_instructions: "error: file search failed",
+            });
+        }
+    };
+    let elapsed = start.elapsed().as_millis() as u64;
+    let mut out = AiFileOutput::from_matches(body.query, matches, elapsed);
+    out.total_hits = out.matches.len();
+    Json(out)
 }
 
 async fn handle_health() -> Json<serde_json::Value> {
@@ -203,8 +272,8 @@ async fn handle_tools() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "tools": [
             {
-                "name": "search_code",
-                "description": "Search project code using BM25 full-text + optional filename match. Auto-indexes if needed. Supports multi-project via path field.",
+                "name": "search",
+                "description": "Unified code search (STS-X 3.0). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Use output_mode=locate for grep-sized line hits (cheap), or expand (default) for full code blocks.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -217,6 +286,11 @@ async fn handle_tools() -> Json<serde_json::Value> {
                             "enum": ["code", "filename", "all"],
                             "description": "code=AST-aware code search, filename=file name match, all=everything"
                         },
+                        "output_mode": {
+                            "type": "string",
+                            "enum": ["expand", "locate"],
+                            "description": "expand=full AST block (default, for read/modify); locate=line-level grep-sized hits (~130 tok) for first-pass location"
+                        },
                         "path": {
                             "type": "string",
                             "description": "Project root (auto-detected if omitted)"
@@ -228,8 +302,8 @@ async fn handle_tools() -> Json<serde_json::Value> {
                         },
                         "context_lines": {
                             "type": "integer",
-                            "description": "Lines around each match (default 5, 0=full block)",
-                            "default": 5
+                            "description": "Lines around each match in expand mode (default 0 = full block, >0 = window)",
+                            "default": 0
                         },
                         "filename": {
                             "type": "boolean",
@@ -238,6 +312,38 @@ async fn handle_tools() -> Json<serde_json::Value> {
                         "all": {
                             "type": "boolean",
                             "description": "Shortcut: search all files"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "file",
+                "description": "File search across ANY directory (no index needed). Searches filename + content via ripgrep (or built-in walker). Perfect for locating assets/configs/prompts in unindexed dirs like ~/Downloads.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Filename fragment or content term"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search (default: server cwd)"
+                        },
+                        "content": {
+                            "type": "boolean",
+                            "description": "Also match file content (default true). Set false for name-only.",
+                            "default": true
+                        },
+                        "name_only": {
+                            "type": "boolean",
+                            "description": "Alias for content=false (name match only)"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Maximum results (default 20)",
+                            "default": 20
                         }
                     },
                     "required": ["query"]

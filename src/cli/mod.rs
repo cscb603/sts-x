@@ -58,15 +58,40 @@ pub enum Commands {
         /// Search all files (code + non-code, filename + content)
         #[arg(long)]
         all: bool,
+        /// Output mode: --expand (default) returns full AST blocks (read/modify);
+        /// --locate returns only matching lines + small context (grep-sized, ~130 tok).
+        #[arg(long)]
+        locate: bool,
+        /// Explicitly request --expand (full blocks). Default when neither flag is given.
+        #[arg(long)]
+        expand: bool,
         /// Number of results (default: 3)
         #[arg(short, long, default_value = "3")]
         top_k: usize,
-        /// Context lines around match (default: 5, 0 = full block)
-        #[arg(short = 'c', long, default_value = "5")]
+        /// Context lines around match for --expand (default: 0 = full block; >0 = window)
+        #[arg(short = 'c', long, default_value = "0")]
         context: usize,
         /// Human-readable output instead of default JSON
         #[arg(short = 'H', long)]
         human: bool,
+    },
+    /// File search: filename + content across ANY directory (no index needed).
+    /// Uses ripgrep if available, else a gitignore-aware walk. Zero-config.
+    File {
+        /// Search query (filename fragment or content term)
+        query: String,
+        /// Directory to search (default: current directory)
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
+        /// Match content (default) in addition to filename. Use --name-only to skip.
+        #[arg(long)]
+        name_only: bool,
+        /// Maximum results (default: 20)
+        #[arg(short, long, default_value = "20")]
+        top_k: usize,
+        /// Force using the built-in walker instead of ripgrep
+        #[arg(long)]
+        no_rg: bool,
     },
     /// Start MCP HTTP server (auto-indexes, supports multi-project via "path" field)
     Serve {
@@ -100,9 +125,21 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             let p = resolve_path(path);
             cmd_index(&p, output, languages).await
         }
-        Commands::Search { query, path, index_path, filename, all, top_k, context, human } => {
+        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, .. } => {
             let p = resolve_path(path);
-            cmd_search(query, &p, index_path.as_ref(), *filename, *all, *top_k, *context, *human).await
+            let mode = if *locate {
+                crate::types::OutputMode::Locate
+            } else {
+                crate::types::OutputMode::Expand
+            };
+            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human).await
+        }
+        Commands::File { query, path, name_only, top_k, no_rg } => {
+            let p = match path {
+                Some(p) => normalize_path(p),
+                None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            };
+            cmd_file(&query, &p, *name_only, *top_k, *no_rg).await
         }
         Commands::Serve { path, index_path, host, port } => {
             let p = resolve_path(path);
@@ -219,6 +256,7 @@ async fn cmd_search(
     custom_index: Option<&PathBuf>,
     filename_mode: bool,
     all_mode: bool,
+    output_mode: crate::types::OutputMode,
     top_k: usize,
     context_lines: usize,
     human_output: bool,
@@ -243,6 +281,7 @@ async fn cmd_search(
     let query = SearchQuery {
         query: query_str.to_string(),
         mode,
+        output_mode,
         top_k,
         context_lines,
         ..Default::default()
@@ -250,15 +289,44 @@ async fn cmd_search(
 
     let mut response = engine.search(query)?;
 
-    postprocess::post_process_results(&mut response, query_str, context_lines);
-
     if human_output {
+        // Human readable is always the full-block (expand) view.
+        postprocess::post_process_results(&mut response, query_str, context_lines);
         print!("{}", format_human_readable(&response));
+    } else if matches!(output_mode, crate::types::OutputMode::Locate) {
+        let ai_output: crate::types::format::AiLocateOutput = response.into();
+        println!("{}", serde_json::to_string_pretty(&ai_output)?);
     } else {
+        postprocess::post_process_results(&mut response, query_str, context_lines);
         let ai_output: crate::types::format::AiSearchOutput = response.into();
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
     }
 
+    Ok(())
+}
+
+/// `file` subcommand: filename + content search across ANY directory,
+/// with zero index required. Prefers ripgrep; falls back to a gitignore-aware
+/// walker. Mirrors the `sts` file-search UX for AI consumption.
+async fn cmd_file(
+    query_str: &str,
+    dir: &Path,
+    name_only: bool,
+    top_k: usize,
+    no_rg: bool,
+) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    let matches = crate::filesearch::search_files(query_str, dir, name_only, top_k, !no_rg)?;
+    let elapsed = start.elapsed().as_millis() as u64;
+    let out = crate::types::format::AiFileOutput::from_matches(
+        query_str.to_string(),
+        matches,
+        elapsed,
+    );
+    // total_hits is the actual match count
+    let mut out = out;
+    out.total_hits = out.matches.len();
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 

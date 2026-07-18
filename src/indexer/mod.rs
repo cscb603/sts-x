@@ -12,7 +12,8 @@
  * For larger scale, a dedicated vector DB can be swapped in.
  */
 
-use crate::types::{CodeBlock, IndexConfig, SearchResult};
+use crate::types::{CodeBlock, IndexConfig, LocateMatch, SearchResult};
+use std::collections::HashSet;
 use crate::embed::EmbeddingModel;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -418,6 +419,104 @@ impl SearchIndex {
 
         tracing::info!("search_all_files: {} results in {:?}", results.len(), start.elapsed());
         Ok(results)
+    }
+
+    /// Live grep over CODE files only (gitignore-aware, binary-skipping).
+    ///
+    /// Returns grep-sized line hits capped at `top_k` as `LocateMatch`, skipping
+    /// any relative path already present in `skip_paths`. Used by locate mode as a
+    /// **budget-capped** fallback when BM25 under-delivers (e.g. the best hit is
+    /// in a code file the chunker missed, or an unindexed path).
+    ///
+    /// Unlike `search_all_files`, this searches CODE files (the old locate
+    /// fallback skipped them, so code queries fell through to `.md` docs and
+    /// blew the token budget).
+    pub fn search_code_live(
+        &self,
+        terms: &[String],
+        top_k: usize,
+        skip_paths: &HashSet<String>,
+    ) -> Result<Vec<LocateMatch>> {
+        let mut out: Vec<LocateMatch> = Vec::new();
+        if terms.is_empty() || top_k == 0 {
+            return Ok(out);
+        }
+
+        let walker = ignore::WalkBuilder::new(&self.config.project_root)
+            .git_ignore(true)
+            .parents(true)
+            .standard_filters(true)
+            .build();
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let is_file = entry.file_type().map(|f| f.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !CODE_EXTENSIONS.contains(&ext.as_str()) {
+                continue;
+            }
+
+            let rel_path = pathdiff::diff_paths(path, &self.config.project_root)
+                .unwrap_or_else(|| path.to_path_buf());
+            let rel_str = rel_path.display().to_string();
+            if skip_paths.contains(&rel_str) {
+                continue;
+            }
+            // Skip excluded patterns
+            if self.config.exclude_patterns.iter().any(|p| {
+                let pattern = p.trim_end_matches("/*");
+                rel_str.starts_with(pattern)
+                    || rel_str.contains("/target/")
+                    || rel_str.contains("node_modules")
+                    || rel_str.contains(".git")
+            }) {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // First line containing any term → one grep-sized hit for this file.
+            if let Some((idx, line)) = content.lines().enumerate().find(|(_, l)| {
+                let low = l.to_lowercase();
+                terms.iter().any(|t| low.contains(t))
+            }) {
+                let trimmed = line.trim();
+                let ctx: String = if trimmed.chars().count() > 48 {
+                    format!("{}…", trimmed.chars().take(48).collect::<String>())
+                } else {
+                    trimmed.to_string()
+                };
+                out.push(LocateMatch {
+                    score: 0.85,
+                    file: rel_str,
+                    abs_path: path.display().to_string(),
+                    line: idx + 1,
+                    context: ctx,
+                    kind: ext,
+                    name: String::new(),
+                });
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Search via BM25 full-text

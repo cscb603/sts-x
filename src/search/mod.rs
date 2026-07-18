@@ -11,6 +11,7 @@ use crate::types::*;
 use crate::indexer::SearchIndex;
 use crate::embed::EmbeddingModel;
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,13 +39,116 @@ impl SearchEngine {
         self
     }
 
-    /// Execute a search query (dispatches by mode)
+    /// Execute a search query (dispatches by mode + output mode)
     pub fn search(&mut self, query: SearchQuery) -> Result<SearchResponse> {
         match query.mode {
             SearchMode::Filename => self.search_filename_mode(&query),
             SearchMode::All => self.search_all_mode(&query),
-            SearchMode::Code => self.search_code_mode(&query),
+            SearchMode::Code => {
+                if matches!(query.output_mode, crate::types::OutputMode::Locate) {
+                    self.search_code_locate(&query)
+                } else {
+                    self.search_code_mode(&query)
+                }
+            }
         }
+    }
+
+    /// Locate mode (3.0): grep-sized line hits inside the top AST blocks.
+    /// Returns individual matching lines (with small context) instead of whole blocks,
+    /// so the AI gets the location cheaply (~130 tok) before deciding to `--expand`.
+    fn search_code_locate(&self, query: &SearchQuery) -> Result<SearchResponse> {
+        let start = Instant::now();
+
+        // Match terms. For a single long token with no whitespace (e.g.
+        // `select_best_cfg`), treat the whole query as one term so it still matches.
+        let mut terms: Vec<String> = query
+            .query
+            .split_whitespace()
+            .filter(|t| t.len() >= 2)
+            .map(|t| t.to_lowercase())
+            .collect();
+        if terms.is_empty() {
+            terms.push(query.query.to_lowercase());
+        }
+
+        // Grep-sized budget: at most 1-2 hits TOTAL so locate stays ~130-200 tok
+        // even for long (CJK) contexts. This cap applies to BOTH the BM25 path and
+        // the live-grep fallback — the old code only capped BM25 and let an uncapped
+        // fallback dump many `.md` hits (→ 502 tok for `select_best_cfg`).
+        let budget = query.top_k.clamp(1, 2);
+
+        // Keep the file path short (last 3 components) so locate stays token-cheap
+        // even inside deeply-nested dirs. The AI expands by symbol if it needs more.
+        let short_path = |p: &str| -> String {
+            let comps: Vec<&str> = p.split(['/', '\\']).filter(|c| !c.is_empty()).collect();
+            if comps.len() > 3 {
+                comps[comps.len() - 3..].join("/")
+            } else {
+                p.to_string()
+            }
+        };
+
+        let mut matches: Vec<LocateMatch> = Vec::new();
+        let mut seen_paths: HashSet<String> = HashSet::new();
+
+        // ── Path A: BM25 over AST chunks (fast, ranked) ──────────────
+        let raw = self.index.search_text(&query.query, query.top_k * 3)?;
+        for (score, ib) in raw.iter() {
+            if matches.len() >= budget {
+                break;
+            }
+            let lines: Vec<&str> = ib.block.code.lines().collect();
+            if let Some((off, _)) = lines.iter().enumerate().find(|(_, line)| {
+                let low = line.to_lowercase();
+                terms.iter().any(|t| low.contains(t))
+            }) {
+                let abs_line = ib.block.start_line + off;
+                let trimmed = lines[off].trim();
+                let ctx: String = if trimmed.chars().count() > 48 {
+                    format!("{}…", trimmed.chars().take(48).collect::<String>())
+                } else {
+                    trimmed.to_string()
+                };
+                let path_str = ib.block.path.display().to_string();
+                seen_paths.insert(path_str.clone());
+                matches.push(LocateMatch {
+                    score: if *score > 0.0 { (*score).min(1.0) } else { 0.0 },
+                    file: short_path(&path_str),
+                    abs_path: ib.block.abs_path.display().to_string(),
+                    line: abs_line,
+                    context: ctx,
+                    kind: format!("{:?}", ib.block.kind).to_lowercase(),
+                    name: ib.block.name.clone(),
+                });
+            }
+        }
+
+        // ── Path B: live grep over CODE files (gitignore-aware, binary-skipping),
+        //    capped at the REMAINING budget. Safety net for queries whose best hit
+        //    is in a code file the chunker missed, or an unindexed path. Code files
+        //    (not .md docs) are searched here, and the cap is always respected. ──
+        if matches.len() < budget {
+            let mut live = self.index.search_code_live(
+                &terms,
+                budget - matches.len(),
+                &seen_paths,
+            )?;
+            for m in live.iter_mut() {
+                m.file = short_path(&m.file);
+            }
+            matches.append(&mut live);
+        }
+
+        let elapsed = start.elapsed().as_millis() as u64;
+        Ok(SearchResponse {
+            query: query.query.clone(),
+            total_hits: matches.len(),
+            results: Vec::new(),
+            search_time_ms: elapsed,
+            multi_hop: None,
+            locate_matches: matches,
+        })
     }
 
     /// Code search (AST chunks, BM25 + optional embedding)
@@ -80,6 +184,7 @@ impl SearchEngine {
             results,
             search_time_ms: elapsed,
             multi_hop: None,
+            locate_matches: Vec::new(),
         })
     }
 
@@ -96,6 +201,7 @@ impl SearchEngine {
             results,
             search_time_ms: elapsed,
             multi_hop: None,
+            locate_matches: Vec::new(),
         })
     }
 
@@ -132,6 +238,7 @@ impl SearchEngine {
             results: merged,
             search_time_ms: elapsed,
             multi_hop: None,
+            locate_matches: Vec::new(),
         })
     }
 }
