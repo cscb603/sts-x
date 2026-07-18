@@ -4,8 +4,9 @@
 
 <h1 align="center">STS-X</h1>
 <p align="center">
-  <strong>下一代 AI 代码搜索引擎</strong><br>
-  AST感知切块 · BM25极速全文搜索 · MCP原生协议 · 18MB零依赖
+  <strong>为 AI Agent 而生的代码搜索引擎</strong><br>
+  AST感知切块 · BM25极速全文搜索 · MCP原生协议 · 18MB零依赖<br>
+  <em>日常代码搜索场景省约 80% token（约为 grep+Read 流程的 1/5）</em>
 </p>
 
 <p align="center">
@@ -13,6 +14,8 @@
     <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本">
   </a>
   <img src="https://img.shields.io/badge/大小-18MB-10B981" alt="大小">
+  <img src="https://img.shields.io/badge/定位-为_AI_而生-4F46E5" alt="定位">
+  <img src="https://img.shields.io/badge/AI场景-省~80%25_token-10B981" alt="省token">
   <img src="https://img.shields.io/badge/延迟-0–2ms-F59E0B" alt="延迟">
   <a href="https://github.com/cscb603/sts-x/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/许可证-MIT-6366F1" alt="许可证">
@@ -127,6 +130,8 @@ STS-X 从架构设计之初就面向 AI，而非事后适配。
 ---
 
 ## 省 Token：AI 场景实测
+
+> **一句话定位：STS-X 是给 AI 用的搜索工具。** 在代码搜索这类 AI 高频任务上，它把"搜→读→再搜"的多轮流程压成一次结构化调用，token 消耗约为传统 `grep` + `Read` 流程的 **1/5（省 ~80%）**，且少 2–3 轮往返——直接降低大模型 API 输入成本与延迟。
 
 很多团队关心接入 STS-X 会不会增加 token 消耗。实测结论：**对"读懂 / 改代码"类深层任务，STS-X 比 grep/sts 流程省约 80% 总 token，且少 2–3 轮往返。**
 
