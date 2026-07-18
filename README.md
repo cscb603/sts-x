@@ -1,90 +1,103 @@
-<div align="center">
-  <img src="assets/icon.png" width="80" alt="STS-X logo">
-  <h1 align="center">STS-X</h1>
-  <p align="center"><strong>AI 代码搜索引擎</strong><br>
-  AST 感知切块 + BM25 全文搜索 + MCP 服务协议<br>
-  17MB 单二进制，零外部依赖，开箱即用</p>
-  <p>
-    <a href="#特性">特性</a> ·
-    <a href="#快速开始">快速开始</a> ·
-    <a href="#搜索模式">搜索模式</a> ·
-    <a href="#mcp-服务">MCP 服务</a> ·
-    <a href="#ai-原生设计">AI 原生设计</a> ·
-    <a href="#构建">构建</a>
-  </p>
-  <p>
-    <img src="https://img.shields.io/badge/macOS-支持-brightgreen?logo=apple">
-    <img src="https://img.shields.io/badge/Windows-支持-blue?logo=windows">
-    <img src="https://img.shields.io/badge/Linux-计划中-lightgrey?logo=linux">
-    <img src="https://img.shields.io/badge/license-MIT-blue">
-    <img src="https://img.shields.io/badge/大小-17MB-blue">
-    <img src="https://img.shields.io/badge/版本-v0.2.0-blue">
-  </p>
-</div>
+<p align="center">
+  <img src="assets/icon.png" width="96" alt="STS-X">
+</p>
+
+<h1 align="center">STS-X</h1>
+<p align="center">
+  <strong>下一代 AI 代码搜索引擎</strong><br>
+  AST感知切块 · BM25极速全文搜索 · MCP原生协议 · 17MB零依赖
+</p>
+
+<p align="center">
+  <a href="https://github.com/cscb603/sts-x/releases">
+    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本">
+  </a>
+  <img src="https://img.shields.io/badge/大小-17MB-10B981" alt="大小">
+  <img src="https://img.shields.io/badge/延迟-0–2ms-F59E0B" alt="延迟">
+  <a href="https://github.com/cscb603/sts-x/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/许可证-MIT-6366F1" alt="许可证">
+  </a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS_ARM64-✅_支持-4F46E5?logo=apple">
+  <img src="https://img.shields.io/badge/Windows_x86_64-✅_支持-2563EB?logo=windows">
+  <img src="https://img.shields.io/badge/Linux-⏳_计划中-9CA3AF?logo=linux">
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#ai-原生设计">AI原生设计</a> ·
+  <a href="#mcp-服务">MCP服务</a> ·
+  <a href="#用例">用例</a> ·
+  <a href="#技术规格">技术规格</a> ·
+  <a href="#构建">构建</a>
+</p>
 
 ---
 
-STS-X 是一个专为 **AI Agent** 设计的代码搜索引擎。与 IDE 内置搜索不同，STS-X 默认输出 JSON、提供 MCP HTTP 服务、基于 AST 语法树切块返回完整的函数/类代码块。
+STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代设计。与 IDE 内置搜索或 grep/ripgrep 等传统工具不同，STS-X 从内核就围绕 AI 的使用场景构建：默认输出结构化 JSON、内置 MCP HTTP 服务供 AI Agent 调用、基于 AST 语法树切块返回完整的函数/类代码块而非零散行。
 
-## 特性
+### 它解决什么问题？
 
-- **🧩 AST 感知切块** — 基于 tree-sitter 解析语法树，按函数、类、方法返回完整代码块
-- **⚡ 极速 BM25** — Tantivy 倒排索引引擎，搜索 0–2ms 响应
-- **🔌 MCP 协议服务** — 内置 HTTP 服务器，支持工具发现（GET /tools）和服务自文档（GET /）
-- **📦 零依赖** — 17MB 单二进制，无需 Python、Node.js、数据库
-- **🔍 三种搜索模式** — Code（代码语义）、Filename（文件名）、All（全文件）
-- **🧠 AI 原生输出** — 默认 JSON 格式，每个响应自带 `_ai_instructions` 使用指南，AI 首次接触即完全掌握用法
-- **🔄 自动索引管理** — 索引自动存入系统缓存，无需手动指定目录；文件变更自动检测并重建
-- **📍 项目根自动探测** — 自动向上查找 `.git`/`Cargo.toml`/`package.json` 等标记文件
-- **🎯 高亮匹配行** — 每个代码块精确标注查询词所在行号，AI 可直接定位
-- **🚀 毫秒级索引** — 千级代码文件 <1 秒完成索引
+| 场景 | 传统工具 | STS-X |
+|------|---------|-------|
+| AI Agent 搜索代码 | 返回纯文本，AI 需要自己解析 | 返回结构化 JSON，字段清晰，自带 `_ai_instructions` 使用指南 |
+| 需要完整函数上下文 | grep 返回零散行，看不懂 | AST 感知切块，按函数/类/方法返回完整代码块 |
+| 集成到 AI 工作流 | 需要写脚本解析输出 | 内置 MCP HTTP 服务，GET /tools 自动发现，POST /search 即用 |
+| 跨平台部署 | 需要安装运行时（Python/Node） | 17MB 单二进制，零依赖，下载即用 |
+| 索引管理 | 手动创建、手动更新 | 自动索引、自动缓存、文件变更自动重建 |
+| Windows 中文路径 | 乱码/编码问题 | 内建 POSIX 路径归一化，原生兼容 |
+
+---
 
 ## 快速开始
 
-### 下载
-
-从 [Releases](https://github.com/cscb603/sts-x/releases) 下载最新版：
+### 一分钟上手
 
 ```bash
-# macOS 版
-wget https://github.com/cscb603/sts-x/releases/latest/download/sts-x-macos
-chmod +x sts-x-macos
-sudo cp sts-x-macos /usr/local/bin/sts-x
-```
+# 1. 下载（macOS）
+curl -L https://github.com/cscb603/sts-x/releases/latest/download/sts-x-aarch64-apple-darwin -o sts-x && chmod +x sts-x
+sudo mv sts-x /usr/local/bin/
 
-```powershell
-# Windows 版（PowerShell）
-curl -L https://github.com/cscb603/sts-x/releases/latest/download/sts-x.exe -o sts-x.exe
-# 或直接下载 exe 文件放入任意目录
-```
-
-### 搜索（自动索引）
-
-STS-X 无需手动索引。在任意项目目录下直接搜索，自动构建索引并缓存：
-
-```bash
-cd /你的项目目录
-
-# 搜索代码（默认 JSON 输出，适合 AI 消费）
+# 2. 进入任意项目目录，直接搜索（自动索引、无需额外步骤）
+cd /your-project
 sts-x search "token verification"
 
-# 搜索文件名
+# 3. 搜索文件名
 sts-x search "config" -f
 
-# 搜索所有文件内容
-sts-x search "TODO" --all
-
-# 人类友好模式
+# 4. 人类友好模式
 sts-x search "token verification" -H
 ```
 
-### 手动索引（可选）
-
-```bash
-sts-x index .
+```powershell
+# Windows（PowerShell）
+curl -L https://github.com/cscb603/sts-x/releases/latest/download/sts-x-x86_64-pc-windows-gnu.exe -o sts-x.exe
+.\sts-x.exe search "token verification"
 ```
 
-### JSON 输出示例
+### 启动 MCP 服务（AI Agent 模式）
+
+```bash
+# 启动服务，自动探测项目根
+sts-x serve
+
+# AI Agent 调用
+curl -X POST http://127.0.0.1:9876/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"token verification","top_k":3}'
+```
+
+---
+
+## AI 原生设计
+
+STS-X 从架构设计之初就面向 AI，而非事后适配。
+
+### 自说明响应
+
+每个搜索响应自动携带 `_ai_instructions` 字段，包含完整的 STS-X 使用指南、参数说明、MCP 端点用法。**AI Agent 只需一次调用即可完全掌握 STS-X 的全部能力**，无需查阅外部文档。
 
 ```json
 {
@@ -99,155 +112,189 @@ sts-x index .
       "name": "verify_token",
       "signature": "pub fn verify_token(token: &str, secret: &[u8]) -> Result<Claims>",
       "language": "rust",
-      "code": "pub fn verify_token(token: &str, secret: &[u8]) -> Result<Claims> {\n    ...\n}"
+      "code": "pub fn verify_token(token: &str, secret: &[u8]) -> Result<Claims> { ... }"
     }
   ],
   "total_hits": 5,
   "search_time_ms": 1,
-  "_ai_instructions": "STS-X 使用指南..."
+  "_ai_instructions": "STS-X is an AI code search engine..."
 }
 ```
 
-## 搜索模式
+### 智能默认值（v0.2.0）
 
-| 模式 | 命令 | 说明 |
-|------|------|------|
-| Code | `search "query"` | 默认。搜代码内容，AST 切块返回 |
-| Filename | `search "query" -f` | 搜文件名，忽略 .gitignore |
-| All | `search "query" --all` | 搜所有文件（代码 + 文本 + 配置） |
+| 参数 | 默认值 | 设计理由 |
+|------|--------|---------|
+| `top_k` | **3** | 返回最相关结果，AI 场景下节省大量 token |
+| `context_lines` | **5** | 匹配行上下各 5 行，足够理解代码结构又不过度 |
+| 输出格式 | **JSON** | AI 最擅长的结构化数据格式 |
+
+### 代码后处理引擎
+
+- **高亮行标注**：`highlight_lines` 字段精确标注查询词在代码块中的行号，AI 可直接定位关键代码
+- **上下文控制**：通过 `--context N` 参数灵活控制返回行数，N=0 时返回完整代码块
+
+---
 
 ## MCP 服务
 
-启动 MCP HTTP 服务，供 AI Agent 调用：
+STS-X 内置完整的 MCP（Model Context Protocol）HTTP 服务，专为 AI Agent 集成设计。
+
+### 端点总览
+
+| 方法 | 路径 | 用途 | AI Agent 使用场景 |
+|------|------|------|-----------------|
+| `GET` | `/` | 服务文档 + curl 示例 | AI 探索能力时获取帮助 |
+| `GET` | `/health` | 健康检查 | 确认服务可用性 |
+| `GET` | `/tools` | MCP 工具发现 | **自动发现搜索能力**，返回标准 MCP Tool Schema |
+| `POST` | `/search` | 执行搜索 | **核心搜索接口**，支持所有搜索模式 |
+
+### 工具发现（AI 无需预配置）
 
 ```bash
-sts-x serve
-# 自动探测当前目录的项目根，监听 http://127.0.0.1:9876
+# AI Agent 自动发现 STS-X 的全部搜索能力
+curl http://127.0.0.1:9876/tools
+# 返回 MCP 标准格式，包含参数名、类型、描述、默认值
 ```
 
-### 端点一览
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/` | 服务文档 + curl 使用示例 |
-| `GET` | `/health` | 健康检查 |
-| `GET` | `/tools` | MCP 标准工具发现（AI Agent 自动发现搜索能力） |
-| `POST` | `/search` | 执行搜索 |
-
-### AI Agent 调用
+### AI Agent 调用示例
 
 ```bash
-# 搜索代码
+# 代码搜索（默认）
 curl -X POST http://127.0.0.1:9876/search \
   -H "Content-Type: application/json" \
-  -d '{"query":"token verification","top_k":3}'
+  -d '{"query":"error handling","top_k":3}'
 
-# 搜索文件名
+# 文件名搜索
 curl -X POST http://127.0.0.1:9876/search \
   -H "Content-Type: application/json" \
-  -d '{"query":"config","filename":true,"top_k":5}'
+  -d '{"query":"config","filename":true}'
 
 # 指定项目路径
 curl -X POST http://127.0.0.1:9876/search \
   -H "Content-Type: application/json" \
-  -d '{"query":"error handling","path":"/path/to/project"}'
+  -d '{"query":"database","path":"/path/to/project"}'
 ```
 
-### 工具发现（AI 自学习）
+---
+
+## 搜索模式
+
+| 模式 | CLI 命令 | MCP 参数 | 搜索范围 | 输出类型 |
+|------|----------|---------|---------|---------|
+| **Code** | `search "query"` | `{"query":"..."}` | 代码内容 | AST 切块（函数/类） |
+| **Filename** | `search "query" -f` | `{"query":"...","filename":true}` | 文件名 | 匹配的文件路径 |
+| **All** | `search "query" --all` | `{"query":"...","all":true}` | 所有文件内容 | 代码 + 文本 + 配置 |
+
+---
+
+## 用例
+
+### 1. AI 编程助手集成
+
+Cursor、Windsurf、VS Code Copilot 等 AI 编程工具在执行代码搜索时，可直接调用 STS-X MCP 服务获取结构化结果，替代传统的 grep/ripgrep。
+
+### 2. 代码库理解与迁移
 
 ```bash
-# AI Agent 可以通过 GET /tools 自动发现搜索能力
-curl http://127.0.0.1:9876/tools
-# 返回标准 MCP Tool Schema，包含参数描述和默认值
+# 快速理解项目中所有数据库操作
+sts-x search "INSERT INTO|SELECT.*FROM"
+
+# 定位所有错误处理逻辑
+sts-x search "Error|Result<" --context 0
+
+# 搜索某函数的完整实现
+sts-x search "fn authenticate" --context 0
 ```
 
-## AI 原生设计
+### 3. 自动化 CI/CD
 
-STS-X 从内核设计即面向 AI：
+```bash
+# 检查是否所有 TODO/FIXME 都已处理
+sts-x search "TODO|FIXME|HACK" --all -H
 
-### 1. 自说明响应
+# 检查敏感信息是否泄露
+sts-x search "password|secret_key|api_key"
+```
 
-每个 JSON 搜索响应自动包含 `_ai_instructions` 字段，完整描述 STS-X 的用法、参数说明和 MCP 端点。AI Agent 只需一次调用即可学会全部用法。
-
-### 2. 智能默认值
-
-| 参数 | v0.2.0 默认值 | 说明 |
-|------|---------------|------|
-| `top_k` | 3 | 返回最相关结果，节省 token |
-| `context_lines` | 5 | 匹配行上下文的行数，足够理解代码结构 |
-| 输出格式 | JSON | 结构化数据，AI 可直接消费 |
-
-### 3. 代码后处理
-
-每个搜索结果经过后处理：
-- **高亮行标注**：`highlight_lines` 字段精确标注查询词所在行号
-- **上下文控制**：通过 `--context N` 控制返回代码块的上下文行数
-
-### 4. 索引管理自动化
-
-- 索引自动存储在系统缓存目录（macOS: `~/Library/Caches/sts-x/`，Windows: `%LOCALAPPDATA%/sts-x/cache/`），不污染项目目录
-- 文件发生变更时自动检测并重建索引
-- 项目根自动向上探测（`.git`/`Cargo.toml`/`package.json`/`go.mod`/`pom.xml` 等 13 种标记）
-
-### 5. Windows 路径兼容
-
-内建 POSIX 路径归一化，git bash 传入的中文路径（如 `/d/项目`）自动转为 Windows 原生格式（`D:\项目`），跨平台无缝使用。
+---
 
 ## 技术规格
 
 | 项目 | 详情 |
 |------|------|
-| 版本 | v0.2.0 |
-| 二进制大小 | 17MB |
-| 搜索延迟 | 0–2ms |
-| 默认输出格式 | JSON |
-| 搜索模式 | Code · Filename · All |
-| 索引引擎 | Tantivy BM25 |
-| AST 解析 | tree-sitter（9 种语言） |
-| MCP 服务 | axum HTTP (RESTful) |
-| 外部依赖 | 零 |
-| 支持语言 | Rust · Python · JavaScript · TypeScript · Java · C · C++ · Go |
-| 可选增强 | ONNX embedding + BGE Reranker（需 `--features semantic`） |
-| 平台 | macOS ARM64 · Windows x86_64 |
-| 许可证 | MIT |
+| **版本** | v0.2.0 |
+| **二进制大小** | 17MB（strip 后） |
+| **搜索延迟** | 0–2ms（千级文件） |
+| **索引引擎** | Tantivy BM25（自定义 code 分词器） |
+| **AST 解析** | tree-sitter（9 种语言） |
+| **MCP 服务** | axum HTTP，RESTful 设计 |
+| **外部依赖** | 零 |
+| **默认输出** | JSON（AI 原生格式） |
+| **支持语言** | Rust · Python · JavaScript · TypeScript · TSX · Java · C · C++ · Go |
+| **响应字段** | score · path · lines · highlight_lines · kind · name · signature · language · code · _ai_instructions |
+| **索引存储** | 系统缓存目录（不污染项目） |
+| **可选增强** | ONNX embedding + BGE Reranker（`--features semantic`） |
+| **平台** | macOS ARM64 · Windows x86_64 |
+| **许可证** | MIT |
+
+---
 
 ## 构建
 
 ```bash
-# 默认构建（BM25 only，~17MB）
+# 默认构建（BM25 模式，17MB）
 cargo build --release
 
-# 带语义搜索（ONNX embedding + reranker，~30MB）
+# 语义搜索增强（ONNX embedding，约 30MB）
 cargo build --release --features semantic
 
 # macOS .app 包
 bash scripts/build.sh mac
 
-# Windows 交叉编译（需 mingw-w64）
+# Windows 交叉编译
 bash scripts/build.sh windows
 ```
 
-## 项目结构
+### 项目结构
 
 ```
 sts-x/
 ├── src/
-│   ├── main.rs          # 入口
-│   ├── lib.rs           # 库入口
-│   ├── cli/             # 命令行接口
-│   ├── indexer/         # tantivy 索引引擎
-│   ├── search/          # 搜索管线
-│   ├── chunker/         # tree-sitter AST 切块
-│   ├── embed/           # ONNX embedding（可选）
-│   ├── server/          # MCP HTTP 服务
-│   ├── postprocess.rs   # 代码后处理（高亮行、上下文控制）
-│   ├── cache.rs         # 跨平台缓存目录管理
-│   └── types/           # 数据结构 + AI 输出格式
-├── assets/              # 图标资源
-├── scripts/             # 构建脚本
-└── index.html           # 宣传页
+│   ├── main.rs            # 程序入口
+│   ├── lib.rs             # 库入口
+│   ├── cli/               # 命令行接口（search/serve/index/status）
+│   ├── indexer/           # Tantivy 索引引擎
+│   ├── search/            # 搜索管线
+│   ├── chunker/           # tree-sitter AST 感知切块
+│   ├── embed/             # ONNX embedding（可选特征）
+│   ├── server/            # MCP HTTP 服务
+│   ├── postprocess.rs     # 代码后处理（高亮行 · 上下文控制）
+│   ├── cache.rs           # 跨平台缓存目录管理
+│   └── types/             # 数据结构 + AI 输出格式
+├── assets/                # 图标资源
+├── scripts/               # 构建脚本
+└── index.html             # 宣传页
 ```
+
+---
+
+## 为什么选择 STS-X？
+
+| 对比维度 | grep/ripgrep | IDE 内置搜索 | Everything | **STS-X** |
+|---------|-------------|-------------|-----------|----------|
+| AI 原生输出 | ❌ 纯文本 | ❌ 纯文本 | ❌ 纯文本 | **✅ 结构化 JSON** |
+| MCP 协议 | ❌ | ❌ | ❌ | **✅ 内置** |
+| 工具自发现 | ❌ | ❌ | ❌ | **✅ GET /tools** |
+| AST 感知切块 | ❌ 零散行 | ❌ 零散行 | ❌ | **✅ 函数/类完整块** |
+| 自动索引 | ❌ | ❌ | ❌ | **✅ 系统缓存** |
+| 项目根自动探测 | ❌ | ❌ | ❌ | **✅ 13种标记** |
+| 跨平台 | ✅ | ❌ | ❌ Windows only | **✅ macOS + Windows** |
+| 零依赖单二进制 | ❌ 需系统 | ❌ 需IDE | ❌ 需安装 | **✅ 17MB** |
+| 搜索延迟 | 毫秒级 | 秒级 | 毫秒级 | **0–2ms** |
+
+---
 
 ## 许可证
 
-MIT License. Copyright © 2026 x tap.
+MIT License. Copyright © 2026 星TAP实验室 &lt;cscb603@qq.com&gt;
