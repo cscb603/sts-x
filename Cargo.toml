@@ -1,6 +1,6 @@
 [package]
 name = "sts-x"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "STS-X: 下一代 AI 代码搜索引擎 — AST 感知切块 + BM25 全文搜索 + MCP 服务，17MB 单二进制零依赖"
 authors = ["xtap"]
@@ -38,10 +38,14 @@ tree-sitter-typescript = "0.21"
 tree-sitter-java = "0.21"
 tree-sitter-c = "0.21"
 tree-sitter-cpp = "0.21"
+tree-sitter-go = "0.21"
 ignore = "0.4"
 
 # Path diff
 pathdiff = "0.2"
+
+# System directories
+dirs = "5"
 
 # Full-text search
 tantivy = "0.22"

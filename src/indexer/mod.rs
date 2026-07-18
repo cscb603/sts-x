@@ -20,6 +20,7 @@ use serde::{Serialize, Deserialize};
 use tantivy::{
     doc,
     schema::*,
+    tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter},
     IndexWriter, IndexReader, Index, ReloadPolicy,
     TantivyDocument,
 };
@@ -77,11 +78,21 @@ const SKIP_EXTENSIONS: &[&str] = &[
 impl SearchIndex {
     /// Create a new empty search index
     pub fn new(config: IndexConfig, embed_model: Option<EmbeddingModel>) -> Result<Self> {
+        let code_tokenizer = TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(128))
+            .filter(LowerCaser)
+            .build();
+
         let mut schema_builder = Schema::builder();
         schema_builder.add_text_field(FIELD_PATH, STRING | STORED);
         schema_builder.add_text_field(FIELD_NAME, TEXT | STORED);
         schema_builder.add_text_field(FIELD_SIGNATURE, TEXT | STORED);
-        schema_builder.add_text_field(FIELD_CODE, TEXT | STORED);
+        let code_options = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("code")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        ).set_stored();
+        schema_builder.add_text_field(FIELD_CODE, code_options.clone());
         schema_builder.add_text_field(FIELD_DOC_COMMENT, TEXT | STORED);
         schema_builder.add_text_field(FIELD_LANGUAGE, STRING | STORED);
         schema_builder.add_text_field(FIELD_KIND, STRING | STORED);
@@ -93,11 +104,15 @@ impl SearchIndex {
         std::fs::create_dir_all(&index_path).ok();
 
         let text_index = if index_path.join("meta.json").exists() {
-            Index::open_in_dir(&index_path)
-                .context("Failed to open existing tantivy index")?
+            let idx = Index::open_in_dir(&index_path)
+                .context("Failed to open existing tantivy index")?;
+            idx.tokenizers().register("code", code_tokenizer);
+            idx
         } else {
-            Index::create_in_dir(&index_path, schema.clone())
-                .context("Failed to create tantivy index")?
+            let idx = Index::create_in_dir(&index_path, schema.clone())
+                .context("Failed to create tantivy index")?;
+            idx.tokenizers().register("code", code_tokenizer);
+            idx
         };
 
         let text_reader = text_index
@@ -438,7 +453,7 @@ impl SearchIndex {
                 e.block.path.display().to_string() == path_str
             }) {
                 // Normalize BM25 score to 0-1 range
-                let norm_score = (score / 10.0).min(1.0).max(0.0);
+                let norm_score = (score / 10.0).clamp(0.0, 1.0);
                 results.push((norm_score, entry));
             }
         }
@@ -523,6 +538,10 @@ impl SearchIndex {
         self.vector_store.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.vector_store.is_empty()
+    }
+
     /// Load stored documents from tantivy into vector_store
     fn load_vector_store_from_tantivy(&mut self) -> Result<()> {
         let searcher = self.text_reader.searcher();
@@ -589,9 +608,11 @@ impl SearchIndex {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
 
+            let rel_path = std::path::PathBuf::from(&path_str);
+            let abs_path = self.config.project_root.join(&rel_path);
             let block = CodeBlock {
-                path: std::path::PathBuf::from(&path_str),
-                abs_path: std::path::PathBuf::from(&path_str),
+                path: rel_path,
+                abs_path,
                 kind: serde_json::from_str(&format!("\"{}\"", kind_str.to_lowercase())).unwrap_or(crate::types::BlockKind::Block),
                 name: name_str,
                 signature: sig_str,

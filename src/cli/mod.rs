@@ -1,29 +1,27 @@
 /*
  * cli/mod.rs
  * Project: sts-x
- * Description: Human-optimized CLI interface
+ * Description: Human/AI-optimized CLI interface
  *
- * Provides a clap-based CLI for humans to use sts-x directly:
- * - `sts-x index <path>` — Index a project
- * - `sts-x search <query>` — Search indexed project
- * - `sts-x serve` — Start MCP server
- * - `sts-x status` — Show index status
+ * Key improvements for AI usage:
+ * - No project pollution: indexes go to system cache dir by default
+ * - Auto-detect project root: walks up to find .git/Cargo.toml/etc.
+ * - Auto-index + stale rebuild: search/serve auto-index if missing or stale
+ * - Smart context: --context N controls snippet size, highlight_lines pinpoints matches
+ * - Zero-config: just run `sts-x search "query"` in any project directory
+ * - Token-optimized defaults: top_k=3, context=5 for AI consumption
  */
 
 use crate::types::{IndexConfig, SearchQuery, SearchMode, format::format_human_readable};
 use crate::chunker::Chunker;
-use crate::embed::EmbeddingModel;
 use crate::indexer::SearchIndex;
 use crate::search::SearchEngine;
+use crate::cache;
+use crate::postprocess;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// STS-X: AI 代码搜索引擎 — AST 切块 + BM25 + MCP 服务
-///
-/// 单二进制零依赖，默认 JSON 输出给 AI 消费。
-/// 三种搜索模式：Code（代码语义）、Filename（文件名）、All（全文件）。
-/// 提供 MCP HTTP 服务（POST /search），供 AI Agent 直接调用。
 #[derive(Parser)]
 #[command(name = "sts-x", version, about, long_about = None)]
 pub struct Cli {
@@ -33,64 +31,64 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Index a project directory
+    /// Index a project directory (manual; usually not needed — search auto-indexes)
     Index {
-        /// Project root path
-        path: PathBuf,
-        /// Index output directory (default: <project>/.stsx-index)
+        /// Project root path (default: auto-detected from current directory)
+        path: Option<PathBuf>,
+        /// Custom index output directory (default: system cache dir)
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Languages to index (comma-separated, default: all supported)
         #[arg(short, long)]
         languages: Option<String>,
-        /// Embedding model path (requires `semantic` feature: cargo build --features semantic)
-        #[arg(short, long)]
-        model: Option<PathBuf>,
     },
-    /// Search an indexed project
+    /// Search a project (auto-indexes if needed, auto-detects project root)
     Search {
         /// Natural language query
         query: String,
-        /// Project root or index path
+        /// Project root path (default: auto-detected from current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
-        /// Custom index directory (default: <project>/.stsx-index)
+        /// Custom index directory (default: system cache dir)
         #[arg(short = 'o', long)]
         index_path: Option<PathBuf>,
-        /// Search mode: -f = filename only, --all = all files content
+        /// Search file names only (fast live walk, no index needed)
         #[arg(short = 'f', long)]
         filename: bool,
         /// Search all files (code + non-code, filename + content)
         #[arg(long)]
         all: bool,
-        /// Number of results (default: 5)
-        #[arg(short, long, default_value = "5")]
+        /// Number of results (default: 3)
+        #[arg(short, long, default_value = "3")]
         top_k: usize,
+        /// Context lines around match (default: 5, 0 = full block)
+        #[arg(short = 'c', long, default_value = "5")]
+        context: usize,
         /// Human-readable output instead of default JSON
         #[arg(short = 'H', long)]
         human: bool,
     },
-    /// Start MCP HTTP server
+    /// Start MCP HTTP server (auto-indexes, supports multi-project via "path" field)
     Serve {
-        /// Project root or index path (default: current dir)
+        /// Project root path (default: auto-detected from current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
-        /// Custom index directory (default: <project>/.stsx-index)
+        /// Custom index directory (default: system cache dir)
         #[arg(short = 'o', long)]
         index_path: Option<PathBuf>,
         /// Host address (default: 127.0.0.1)
-        #[arg(short, long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port (default: 9876)
-        #[arg(short, long, default_value = "9876")]
+        #[arg(short = 'P', long, default_value = "9876")]
         port: u16,
     },
-    /// Show index status
+    /// Show index status and cache location
     Status {
-        /// Project root or index path
+        /// Project root path (default: auto-detected from current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
-        /// Custom index directory (default: <project>/.stsx-index)
+        /// Custom index directory (default: system cache dir)
         #[arg(short = 'o', long)]
         index_path: Option<PathBuf>,
     },
@@ -98,100 +96,139 @@ pub enum Commands {
 
 pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     match &cli.command {
-        Commands::Index { path, output, languages, model } => {
-            cmd_index(path, output, languages, model).await
+        Commands::Index { path, output, languages } => {
+            let p = resolve_path(path);
+            cmd_index(&p, output, languages).await
         }
-        Commands::Search { query, path, index_path, filename, all, top_k, human } => {
-            cmd_search(query, path, index_path.as_ref(), *filename, *all, *top_k, *human).await
+        Commands::Search { query, path, index_path, filename, all, top_k, context, human } => {
+            let p = resolve_path(path);
+            cmd_search(query, &p, index_path.as_ref(), *filename, *all, *top_k, *context, *human).await
         }
         Commands::Serve { path, index_path, host, port } => {
-            cmd_serve(path.as_ref(), index_path.as_ref(), host, *port).await
+            let p = resolve_path(path);
+            cmd_serve(&p, index_path.as_ref(), host, *port).await
         }
         Commands::Status { path, index_path } => {
-            cmd_status(path, index_path.as_ref()).await
+            let p = resolve_path(path);
+            cmd_status(&p, index_path.as_ref()).await
         }
     }
+}
+
+/// Normalize POSIX-style paths for Windows (e.g. /c/Users → C:\Users)
+/// On non-Windows, this is a no-op.
+fn normalize_path(p: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let s = p.to_string_lossy();
+        // Convert /c/... or /C/... to C:\...
+        if s.starts_with('/') && s.len() >= 3 && s.as_bytes()[2] == b'/' {
+            let drive = s.as_bytes()[1].to_ascii_uppercase() as char;
+            if drive.is_ascii_alphabetic() {
+                let rest = &s[3..].replace('/', "\\");
+                return PathBuf::from(format!("{}:\\{}", drive, rest));
+            }
+        }
+        // Convert C:/... to C:\...
+        if s.len() >= 3 && s.as_bytes()[1] == b':' && s.as_bytes()[2] == b'/' {
+            return PathBuf::from(s.replace('/', "\\"));
+        }
+    }
+    p.to_path_buf()
+}
+
+fn resolve_path(explicit: &Option<PathBuf>) -> PathBuf {
+    let start = match explicit {
+        Some(p) => normalize_path(p),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    cache::detect_project_root(&start)
+}
+
+fn build_config(project_root: &Path, custom_index: Option<&PathBuf>) -> IndexConfig {
+    IndexConfig {
+        project_root: project_root.to_path_buf(),
+        index_path: cache::resolve_index_path(project_root, custom_index),
+        ..IndexConfig::default()
+    }
+}
+
+async fn ensure_indexed(config: &IndexConfig) -> anyhow::Result<bool> {
+    let tantivy_dir = config.index_path.join("tantivy");
+    let meta = tantivy_dir.join("meta.json");
+
+    if meta.exists() && !cache::is_index_stale(&config.index_path, &config.project_root) {
+        tracing::debug!("Index exists and fresh at {}", config.index_path.display());
+        return Ok(false);
+    }
+
+    if meta.exists() {
+        tracing::info!("Index is stale, rebuilding for: {}", config.project_root.display());
+        eprintln!("[sts-x] Index stale, rebuilding {} ...", config.project_root.display());
+        std::fs::remove_dir_all(&config.index_path).ok();
+    } else {
+        tracing::info!("No index found, auto-indexing project: {}", config.project_root.display());
+        eprintln!("[sts-x] Building index for {} ...", config.project_root.display());
+    }
+
+    std::fs::create_dir_all(&config.index_path)?;
+
+    let mut chunker = Chunker::new(&config.languages)?;
+    let blocks = chunker.index_project(&config.project_root, config)?;
+    tracing::info!("Found {} code blocks", blocks.len());
+
+    let mut index = SearchIndex::new(config.clone(), None)?;
+    index.index_blocks(blocks)?;
+    index.index_file_paths(config)?;
+
+    eprintln!("[sts-x] Index ready ({} blocks) at {}", index.len(), config.index_path.display());
+    Ok(true)
 }
 
 async fn cmd_index(
-    project_root: &PathBuf,
+    project_root: &Path,
     output: &Option<PathBuf>,
     languages: &Option<String>,
-    model_path: &Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    tracing::info!("Indexing project: {}", project_root.display());
-
-    let mut config = IndexConfig::default();
-    config.project_root = project_root.clone();
-    if let Some(out) = output {
-        config.index_path = out.clone();
-    } else {
-        config.index_path = project_root.join(".stsx-index");
-    }
+    let mut config = build_config(project_root, output.as_ref());
     if let Some(langs) = languages {
         config.languages = langs.split(',').map(|s| s.trim().to_string()).collect();
     }
-    if let Some(mp) = model_path {
-        config.model_path = mp.clone();
-    }
 
-    // Ensure index directory exists
+    tracing::info!("Indexing project: {}", project_root.display());
+    eprintln!("[sts-x] Indexing {} ...", project_root.display());
+
     std::fs::create_dir_all(&config.index_path)?;
 
-    // Load embedding model if provided
-    let embed_model = if let Some(mp) = model_path {
-        let tokenizer_path = mp.join("tokenizer.json");
-        let model_file = mp.join("model.onnx");
-        if model_file.exists() && tokenizer_path.exists() {
-            tracing::info!("Loading embedding model from: {}", mp.display());
-            Some(EmbeddingModel::load(&model_file, &tokenizer_path, 384, 512)?)
-        } else {
-            tracing::warn!("Model path provided but model.onnx or tokenizer.json not found at {}. Skipping embeddings.", mp.display());
-            None
-        }
-    } else {
-        tracing::info!("No embedding model provided. Indexing with BM25 only (no semantic search).");
-        None
-    };
-
-    // Step 1: Chunk code
-    tracing::info!("Parsing code with tree-sitter AST...");
     let mut chunker = Chunker::new(&config.languages)?;
     let blocks = chunker.index_project(project_root, &config)?;
-    tracing::info!("Found {} code blocks", blocks.len());
+    eprintln!("[sts-x] Parsed {} code blocks", blocks.len());
 
-    // Step 2: Index
-    tracing::info!("Building search index...");
-    let mut index = SearchIndex::new(config.clone(), embed_model)?;
+    let mut index = SearchIndex::new(config.clone(), None)?;
     index.index_blocks(blocks)?;
-    // Also index non-code file paths (for filename search)
     index.index_file_paths(&config)?;
 
-    tracing::info!("Indexed {} blocks + file paths. Ready.", index.len());
-
+    eprintln!("[sts-x] Indexed {} blocks → {}", index.len(), config.index_path.display());
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_search(
     query_str: &str,
-    path: &Option<PathBuf>,
+    root: &Path,
     custom_index: Option<&PathBuf>,
     filename_mode: bool,
     all_mode: bool,
     top_k: usize,
+    context_lines: usize,
     human_output: bool,
 ) -> anyhow::Result<()> {
-    let root = path.as_deref().unwrap_or(&std::env::current_dir()?).to_path_buf();
-    let mut config = IndexConfig::default();
-    config.project_root = root.clone();
-    config.index_path = custom_index.cloned().unwrap_or_else(|| root.join(".stsx-index"));
+    let config = build_config(root, custom_index);
 
-    // Check if index exists
-    if !config.index_path.join("tantivy").exists() {
-        anyhow::bail!("No index found at {}. Run `sts-x index <path>` first.", config.index_path.display());
+    if !filename_mode {
+        ensure_indexed(&config).await?;
     }
 
-    // Determine search mode
     let mode = if all_mode {
         SearchMode::All
     } else if filename_mode {
@@ -200,24 +237,24 @@ async fn cmd_search(
         SearchMode::Code
     };
 
-    // Load embedding model if available
-    let embed_model = None; // For search-only, we don't need the model (vectors are stored)
-    let index = SearchIndex::new(config.clone(), embed_model)?;
-
+    let index = SearchIndex::new(config.clone(), None)?;
     let mut engine = SearchEngine::new(Arc::new(index), None);
+
     let query = SearchQuery {
         query: query_str.to_string(),
         mode,
         top_k,
+        context_lines,
         ..Default::default()
     };
 
-    let response = engine.search(query)?;
+    let mut response = engine.search(query)?;
+
+    postprocess::post_process_results(&mut response, query_str, context_lines);
 
     if human_output {
         print!("{}", format_human_readable(&response));
     } else {
-        // Default: JSON for AI consumption
         let ai_output: crate::types::format::AiSearchOutput = response.into();
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
     }
@@ -225,42 +262,48 @@ async fn cmd_search(
     Ok(())
 }
 
-async fn cmd_serve(path: Option<&PathBuf>, custom_index: Option<&PathBuf>, host: &str, port: u16) -> anyhow::Result<()> {
-    let root = path.unwrap_or(&std::env::current_dir()?).to_path_buf();
-    let mut config = IndexConfig::default();
-    config.project_root = root.clone();
-    config.index_path = custom_index.cloned().unwrap_or_else(|| root.join(".stsx-index"));
-
+async fn cmd_serve(root: &Path, custom_index: Option<&PathBuf>, host: &str, port: u16) -> anyhow::Result<()> {
     tracing::info!("Starting STS-X MCP server for project: {}", root.display());
-    tracing::info!("Listening on {}:{}. POST /search with SearchQuery JSON", host, port);
+    eprintln!("[sts-x] Serving {} on {}:{}", root.display(), host, port);
+    eprintln!("[sts-x] POST {{\"query\":\"...\"}} to http://{}:{}/search", host, port);
+    eprintln!("[sts-x] Index stored at system cache (no project pollution)");
 
-    let index = SearchIndex::new(config.clone(), None)?;
-    let engine = SearchEngine::new(Arc::new(index), None);
-
-    crate::server::serve(engine, host, port).await?;
+    crate::server::serve(root, custom_index, host, port).await?;
     Ok(())
 }
 
-async fn cmd_status(path: &Option<PathBuf>, custom_index: Option<&PathBuf>) -> anyhow::Result<()> {
-    let root = path.as_deref().unwrap_or(&std::env::current_dir()?).to_path_buf();
-    let index_path = custom_index.cloned().unwrap_or_else(|| root.join(".stsx-index"));
+async fn cmd_status(root: &Path, custom_index: Option<&PathBuf>) -> anyhow::Result<()> {
+    let config = build_config(root, custom_index);
+    let index_path = &config.index_path;
+
+    println!("Project root: {}", config.project_root.display());
+    println!("Index path:   {}", index_path.display());
+    println!("Cache root:   {}", cache::cache_root().display());
 
     if !index_path.exists() {
-        println!("No sts-x index found at: {}", index_path.display());
-        println!("Run `sts-x index {}` to create one.", root.display());
+        println!("Status:       NOT INDEXED");
+        println!("Run `sts-x search \"query\"` in the project directory to auto-index.");
         return Ok(());
     }
 
     let tantivy_path = index_path.join("tantivy");
-    let tantivy_meta = tantivy_path.join("meta.json");
-
-    if tantivy_meta.exists() {
-        let meta = std::fs::read_to_string(&tantivy_meta)?;
-        println!("Index path: {}", index_path.display());
-        println!("Index meta: {}", meta);
+    if tantivy_path.join("meta.json").exists() {
+        if cache::is_index_stale(index_path, root) {
+            println!("Status:       STALE (files changed since last index)");
+            println!("Next search will auto-rebuild.");
+        } else {
+            println!("Status:       READY");
+        }
+        match SearchIndex::new(config, None) {
+            Ok(idx) => {
+                println!("Blocks:       {}", idx.len());
+            }
+            Err(e) => {
+                println!("Index error:  {}", e);
+            }
+        }
     } else {
-        println!("Index path: {}", index_path.display());
-        println!("Size: {} entries (approx)", std::fs::read_dir(&tantivy_path).map(|d| d.count()).unwrap_or(0));
+        println!("Status:       INCOMPLETE");
     }
 
     Ok(())

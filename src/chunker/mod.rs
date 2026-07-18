@@ -11,7 +11,7 @@
 use crate::types::{BlockKind, CodeBlock};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tree_sitter::{Parser, Language};
 
 /// Language configuration mapping
@@ -25,6 +25,7 @@ fn get_language(lang: &str) -> Option<Language> {
         "java" => Some(tree_sitter_java::language()),
         "c" => Some(tree_sitter_c::language()),
         "cpp" => Some(tree_sitter_cpp::language()),
+        "go" => Some(tree_sitter_go::language()),
         _ => None,
     }
 }
@@ -191,8 +192,8 @@ impl Chunker {
         &self,
         cursor: &mut tree_sitter::TreeCursor,
         source: &str,
-        abs_path: &PathBuf,
-        path: &PathBuf,
+        abs_path: &Path,
+        path: &Path,
         language: &str,
         blocks: &mut Vec<CodeBlock>,
     ) {
@@ -235,8 +236,8 @@ impl Chunker {
 fn collect_single_block(
     node: tree_sitter::Node,
     source: &str,
-    abs_path: &PathBuf,
-    path: &PathBuf,
+    abs_path: &Path,
+    path: &Path,
     language: &str,
     blocks: &mut Vec<CodeBlock>,
 ) {
@@ -266,8 +267,8 @@ fn collect_single_block(
     );
 
     blocks.push(CodeBlock {
-        path: path.clone(),
-        abs_path: abs_path.clone(),
+        path: path.to_path_buf(),
+        abs_path: abs_path.to_path_buf(),
         kind: block_kind,
         name,
         signature,
