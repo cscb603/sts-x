@@ -193,7 +193,7 @@ async fn handle_search(
     let mut search_query = query.clone();
     search_query.mode = mode;
     if search_query.top_k == 0 {
-        search_query.top_k = 3;
+        search_query.top_k = 2;
     }
     // 3.0: expand default = full block (context_lines 0). Do NOT force 5.
 
@@ -297,8 +297,8 @@ async fn handle_tools() -> Json<serde_json::Value> {
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": "Number of results (default 3)",
-                            "default": 3
+                            "description": "Number of results (default 2)",
+                            "default": 2
                         },
                         "context_lines": {
                             "type": "integer",

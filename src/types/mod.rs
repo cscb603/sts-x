@@ -110,7 +110,7 @@ pub struct SearchQuery {
     pub all: bool,
 }
 
-fn default_top_k() -> usize { 3 }
+fn default_top_k() -> usize { 2 }
 fn default_context() -> usize { 0 }
 
 impl Default for SearchQuery {
@@ -121,7 +121,7 @@ impl Default for SearchQuery {
             output_mode: OutputMode::default(),
             languages: None,
             path_filter: None,
-            top_k: 3,
+            top_k: 2,
             // 0 = full block (expand default is complete AST block, not a window)
             context_lines: 0,
             multi_hop: false,

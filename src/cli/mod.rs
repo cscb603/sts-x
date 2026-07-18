@@ -9,7 +9,7 @@
  * - Auto-index + stale rebuild: search/serve auto-index if missing or stale
  * - Smart context: --context N controls snippet size, highlight_lines pinpoints matches
  * - Zero-config: just run `sts-x search "query"` in any project directory
- * - Token-optimized defaults: top_k=3, context=5 for AI consumption
+ * - Token-optimized defaults: top_k=2, context=0 for AI consumption
  */
 
 use crate::types::{IndexConfig, SearchQuery, SearchMode, format::format_human_readable};
@@ -65,8 +65,8 @@ pub enum Commands {
         /// Explicitly request --expand (full blocks). Default when neither flag is given.
         #[arg(long)]
         expand: bool,
-        /// Number of results (default: 3)
-        #[arg(short, long, default_value = "3")]
+        /// Number of results (default: 2)
+        #[arg(short, long, default_value = "2")]
         top_k: usize,
         /// Context lines around match for --expand (default: 0 = full block; >0 = window)
         #[arg(short = 'c', long, default_value = "0")]
