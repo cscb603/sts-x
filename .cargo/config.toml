@@ -1,3 +1,8 @@
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
+
+# Windows MSVC 交叉编译（macOS → Windows，cargo-xwin）
+# 静态链接 CRT（+crt-static）→ 单文件 .exe 不再依赖用户机的 VCRUNTIME140.dll
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
