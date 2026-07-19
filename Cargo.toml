@@ -68,7 +68,7 @@ name = "sts-x"
 path = "src/main.rs"
 
 [build-dependencies]
-embed-resource = "2"
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3
