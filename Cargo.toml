@@ -1,6 +1,6 @@
 [package]
 name = "sts-x"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 description = "STS-X 3.0: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
 authors = ["星TAP实验室软件 <cscb603@qq.com>"]
