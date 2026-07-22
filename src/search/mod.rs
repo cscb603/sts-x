@@ -174,7 +174,10 @@ impl SearchEngine {
         };
 
         #[cfg(not(feature = "semantic"))]
-        let results = normalize_scores(&raw_results, query.top_k);
+        let mut results = normalize_scores(&raw_results, query.top_k);
+
+        // Apply max_tokens budget truncation
+        truncate_by_tokens(&mut results, query.max_tokens);
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -192,7 +195,8 @@ impl SearchEngine {
     fn search_filename_mode(&self, query: &SearchQuery) -> Result<SearchResponse> {
         let start = Instant::now();
         let config = self.index.config();
-        let results = SearchIndex::search_filename_live(&query.query, config, query.top_k)?;
+        let mut results = SearchIndex::search_filename_live(&query.query, config, query.top_k)?;
+        truncate_by_tokens(&mut results, query.max_tokens);
         let elapsed = start.elapsed().as_millis() as u64;
 
         Ok(SearchResponse {
@@ -229,6 +233,7 @@ impl SearchEngine {
             }
         }
         merged.truncate(query.top_k);
+        truncate_by_tokens(&mut merged, query.max_tokens);
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -241,6 +246,39 @@ impl SearchEngine {
             locate_matches: Vec::new(),
         })
     }
+}
+
+/// Estimate token count from character count (fast budget, no model inference).
+/// Uses the same rule as CLI: (char_count + 1) / 2.
+fn estimate_tokens(text: &str) -> usize {
+    let chars = text.chars().count();
+    (chars + 1) / 2
+}
+
+/// Truncate results to fit within `max_tokens` budget.
+/// Drops lowest-score results until the estimated total is within budget.
+/// Each result's token estimate is based on its code + signature content.
+fn truncate_by_tokens(results: &mut Vec<SearchResult>, max_tokens: usize) {
+    if max_tokens == 0 || results.is_empty() {
+        return;
+    }
+    // Sort by score descending first (should already be sorted)
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut total: usize = 0;
+    let mut keep: Vec<SearchResult> = Vec::new();
+    for r in results.drain(..) {
+        let content = format!("{}\n{}\n{}\n{}", r.block.name, r.block.signature, r.block.code, r.block.doc_comment);
+        let tok = estimate_tokens(&content);
+        if total + tok <= max_tokens || keep.is_empty() {
+            total += tok;
+            keep.push(r);
+        } else {
+            // This result would exceed the budget; drop it
+            break;
+        }
+    }
+    *results = keep;
 }
 
 /// Normalize BM25 scores to 0-1 range and take top_k

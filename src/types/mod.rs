@@ -108,6 +108,12 @@ pub struct SearchQuery {
     pub filename: bool,
     #[serde(default)]
     pub all: bool,
+    /// Max tokens for the combined result output. 0 = unlimited.
+    /// Estimation: (char_count + 1) / 2. Results are truncated (drop lowest-score)
+    /// until the token budget is met. Affects expand mode only (locate is already
+    /// budget-capped at the line level).
+    #[serde(default)]
+    pub max_tokens: usize,
 }
 
 fn default_top_k() -> usize { 2 }
@@ -128,6 +134,7 @@ impl Default for SearchQuery {
             path: None,
             filename: false,
             all: false,
+            max_tokens: 0,
         }
     }
 }

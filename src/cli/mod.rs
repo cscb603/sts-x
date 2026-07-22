@@ -74,6 +74,11 @@ pub enum Commands {
         /// Human-readable output instead of default JSON
         #[arg(short = 'H', long)]
         human: bool,
+        /// Cap total output to roughly this many tokens (0 = unlimited).
+        /// Estimation: (char_count + 1) / 2. Results are truncated by dropping
+        /// lowest-score entries until the budget is met.
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
     },
     /// File search: filename + content across ANY directory (no index needed).
     /// Uses ripgrep if available, else a gitignore-aware walk. Zero-config.
@@ -125,14 +130,14 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             let p = resolve_path(path);
             cmd_index(&p, output, languages).await
         }
-        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, .. } => {
+        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, max_tokens, .. } => {
             let p = resolve_path(path);
             let mode = if *locate {
                 crate::types::OutputMode::Locate
             } else {
                 crate::types::OutputMode::Expand
             };
-            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human).await
+            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens).await
         }
         Commands::File { query, path, name_only, top_k, no_rg } => {
             let p = match path {
@@ -260,6 +265,7 @@ async fn cmd_search(
     top_k: usize,
     context_lines: usize,
     human_output: bool,
+    max_tokens: usize,
 ) -> anyhow::Result<()> {
     let config = build_config(root, custom_index);
 
@@ -284,6 +290,7 @@ async fn cmd_search(
         output_mode,
         top_k,
         context_lines,
+        max_tokens,
         ..Default::default()
     };
 
