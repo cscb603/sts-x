@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>STS-X 3.0 · 给 AI 用的搜索引擎</title>
+<style>
+  :root{
+    /* 莫兰迪色板 */
+    --bg:#EDE9E3;          /* 暖米白底 */
+    --paper:#F7F4EF;       /* 卡片纸 */
+    --ink:#4A4541;         /* 主文字 深暖灰 */
+    --ink2:#7A746E;        /* 次文字 */
+    --line:#D8D2C8;        /* 描边 */
+    --mist-blue:#8FA3AD;   /* 雾蓝 主色 */
+    --mist-blue-d:#6E828C;
+    --dust-pink:#C8A9A0;   /* 灰粉 */
+    --sage:#9CAE9B;        /* 灰绿 */
+    --sage-d:#7E9080;
+    --mauve:#A89AAD;       /* 灰紫 */
+    --clay:#B79B8E;        /* 陶土 */
+    --cream:#E4DCCF;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:var(--bg);
+    color:var(--ink);
+    line-height:1.7;
+    font-size:17px;
+    padding:0 0 60px;
+  }
+  .wrap{max-width:460px;margin:0 auto;padding:0 18px;}
+
+  /* ===== Hero ===== */
+  .hero{
+    padding:56px 0 30px;text-align:center;
+  }
+  .badge{
+    display:inline-block;font-size:14px;letter-spacing:2px;
+    color:var(--mist-blue-d);background:#fff;
+    border:1px solid var(--line);border-radius:999px;
+    padding:6px 16px;margin-bottom:22px;
+  }
+  .hero h1{
+    font-size:clamp(40px,13vw,58px);
+    line-height:1.05;font-weight:800;letter-spacing:-1px;
+    color:var(--ink);
+  }
+  .hero h1 .em{color:var(--mist-blue-d);}
+  .hero .sub{
+    margin-top:18px;font-size:19px;color:var(--ink2);font-weight:500;
+  }
+  .hero .hl{
+    display:inline-block;margin-top:20px;
+    background:var(--mist-blue-d);color:#fff;
+    font-size:23px;font-weight:800;letter-spacing:.5px;
+    padding:11px 22px;border-radius:14px;
+    box-shadow:0 6px 18px rgba(110,130,140,.28);
+  }
+  .hero .tag{
+    margin-top:16px;font-size:15px;color:var(--clay);
+  }
+
+  /* ===== 通用区块 ===== */
+  section{padding:30px 0;}
+  .sec-title{
+    font-size:26px;font-weight:800;margin-bottom:6px;letter-spacing:-.5px;
+  }
+  .sec-desc{font-size:16px;color:var(--ink2);margin-bottom:22px;}
+  .divider{height:1px;background:var(--line);margin:0 0;}
+
+  /* ===== 数据大数字卡 ===== */
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .stat{
+    background:var(--paper);border:1px solid var(--line);border-radius:20px;
+    padding:22px 18px;text-align:center;
+  }
+  .stat .num{font-size:42px;font-weight:800;line-height:1;}
+  .stat .num.blue{color:var(--mist-blue-d);}
+  .stat .num.pink{color:var(--dust-pink);}
+  .stat .num.sage{color:var(--sage-d);}
+  .stat .num.mauve{color:var(--mauve);}
+  .stat .lab{margin-top:10px;font-size:14px;color:var(--ink2);}
+
+  /* ===== 卡片 ===== */
+  .card{
+    background:var(--paper);border:1px solid var(--line);border-radius:24px;
+    padding:24px 20px;margin-bottom:16px;
+  }
+  .card h3{font-size:20px;margin-bottom:8px;}
+  .card p{font-size:15.5px;color:var(--ink2);}
+
+  /* ===== SVG 图容器 ===== */
+  .fig{width:100%;display:block;margin:6px auto 4px;}
+  .fig-cap{font-size:14px;color:var(--ink2);text-align:center;margin-top:8px;}
+
+  /* ===== 能力网格 ===== */
+  .feat{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .feat .item{
+    background:var(--paper);border:1px solid var(--line);border-radius:18px;
+    padding:16px 14px;
+  }
+  .feat .ic{width:38px;height:38px;margin-bottom:10px;}
+  .feat .t{font-size:16px;font-weight:700;margin-bottom:3px;}
+  .feat .d{font-size:13.5px;color:var(--ink2);line-height:1.5;}
+
+  /* ===== 平台 ===== */
+  .plat{display:flex;gap:10px;}
+  .plat .p{
+    flex:1;background:var(--paper);border:1px solid var(--line);
+    border-radius:16px;padding:16px 8px;text-align:center;
+  }
+  .plat .p .em{font-size:22px;font-weight:800;}
+  .plat .p .s{font-size:13px;color:var(--ink2);margin-top:4px;}
+
+  /* ===== 结尾 ===== */
+  .foot{
+    text-align:center;padding:34px 0 10px;
+  }
+  .gh{
+    display:inline-block;background:var(--mist-blue-d);color:#fff;
+    font-size:18px;font-weight:700;text-decoration:none;
+    padding:14px 26px;border-radius:14px;letter-spacing:.5px;
+  }
+  .foot .by{margin-top:18px;font-size:14px;color:var(--ink2);}
+  .foot .note{margin-top:10px;font-size:12.5px;color:#A89E94;}
+  .shot-tip{margin-top:8px;font-size:12.5px;color:var(--clay);}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- ===== HERO ===== -->
+  <div class="hero">
+    <div class="badge">AI · 代码搜索 · 开源</div>
+    <h1>STS-X <span class="em">3.0</span></h1>
+    <div class="sub">用 AI 帮你读代码、改项目的人<br>这篇跟你有关</div>
+    <div class="hl">实测省 80–92% token</div>
+    <div class="tag">一次调用，代替 grep + 整文件读取</div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ===== 核心数据 ===== -->
+  <section>
+    <div class="sec-title">到底省了多少？</div>
+    <div class="sec-desc">举个真实的例子：让 AI 在代码里找一个函数。传统 grep + 整文件读取，要喂给它 <b>22,961</b> 个 token；用 STS-X 做同样的事，只要 <b>1,796</b> 个——一下砍掉九成。</div>
+    <div class="stats">
+      <div class="stat"><div class="num blue">92%</div><div class="lab">expand 完整块<br>省下的 token</div></div>
+      <div class="stat"><div class="num sage">99%</div><div class="lab">locate 浅出模式<br>省下的 token</div></div>
+      <div class="stat"><div class="num pink">1 轮</div><div class="lab">完成「读懂实现」<br>以前要 2–3 轮</div></div>
+      <div class="stat"><div class="num mauve">0</div><div class="lab">接入成本<br>结果自带说明书</div></div>
+    </div>
+  </section>
+
+  <!-- ===== 省 token 对比柱状图 ===== -->
+  <section>
+    <div class="sec-title">老做法 vs STS-X</div>
+    <div class="sec-desc">同一查询消耗的上下文 token（越高越烧钱）：</div>
+    <div class="card">
+      <svg class="fig" viewBox="0 0 360 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="token 消耗对比">
+        <!-- 基准线 -->
+        <line x1="30" y1="210" x2="350" y2="210" stroke="#D8D2C8" stroke-width="1.5"/>
+        <!-- grep 柱：满高 -->
+        <rect x="48" y="40" width="64" height="170" rx="8" fill="#A89E94"/>
+        <text x="80" y="32" text-anchor="middle" font-size="15" font-weight="700" fill="#4A4541">22,961</text>
+        <text x="80" y="230" text-anchor="middle" font-size="13" fill="#7A746E">grep + 整读</text>
+        <!-- expand 柱 -->
+        <rect x="148" y="196" width="64" height="14" rx="5" fill="#8FA3AD"/>
+        <text x="180" y="188" text-anchor="middle" font-size="15" font-weight="700" fill="#6E828C">1,796</text>
+        <text x="180" y="230" text-anchor="middle" font-size="13" fill="#7A746E">sts-x expand</text>
+        <!-- locate 柱 -->
+        <rect x="248" y="204" width="64" height="6" rx="3" fill="#9CAE9B"/>
+        <text x="280" y="196" text-anchor="middle" font-size="15" font-weight="700" fill="#7E9080">120</text>
+        <text x="280" y="230" text-anchor="middle" font-size="13" fill="#7A746E">sts-x locate</text>
+        <!-- 省率标注 -->
+        <text x="212" y="120" text-anchor="middle" font-size="13" fill="#A89AAD" font-weight="700">↓ 92%</text>
+        <text x="312" y="150" text-anchor="middle" font-size="13" fill="#7E9080" font-weight="700">↓ 99%</text>
+      </svg>
+      <div class="fig-cap">单位：token（上下文窗口占用）。柱子越矮越省钱。</div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- ===== 二进制内化 / 自说明 ===== -->
+  <section>
+    <div class="sec-title">自带说明书的二进制</div>
+    <div class="sec-desc">AI 第一次碰到这个文件，不用看任何文档就会用——三层自说明：</div>
+    <div class="card">
+      <svg class="fig" viewBox="0 0 360 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="自说明架构">
+        <!-- 连线 -->
+        <line x1="180" y1="150" x2="90" y2="78" stroke="#D8D2C8" stroke-width="2"/>
+        <line x1="180" y1="150" x2="270" y2="78" stroke="#D8D2C8" stroke-width="2"/>
+        <line x1="180" y1="150" x2="180" y2="240" stroke="#D8D2C8" stroke-width="2"/>
+        <!-- 中心：二进制 -->
+        <circle cx="180" cy="150" r="50" fill="#8FA3AD"/>
+        <text x="180" y="144" text-anchor="middle" font-size="15" font-weight="800" fill="#fff">STS-X</text>
+        <text x="180" y="162" text-anchor="middle" font-size="12" fill="#EDE9E3">3.0 二进制</text>
+        <!-- 卫星1：--help -->
+        <circle cx="90" cy="78" r="40" fill="#C8A9A0"/>
+        <text x="90" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">--help</text>
+        <text x="90" y="90" text-anchor="middle" font-size="10.5" fill="#fff">命令行自述</text>
+        <!-- 卫星2：_ai_instructions -->
+        <circle cx="270" cy="78" r="40" fill="#9CAE9B"/>
+        <text x="270" y="72" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">_ai_</text>
+        <text x="270" y="86" text-anchor="middle" font-size="10.5" fill="#fff">结果内嵌说明</text>
+        <!-- 卫星3：MCP -->
+        <circle cx="180" cy="240" r="40" fill="#A89AAD"/>
+        <text x="180" y="236" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">MCP</text>
+        <text x="180" y="252" text-anchor="middle" font-size="10.5" fill="#fff">/tools 自发现</text>
+      </svg>
+      <div class="fig-cap">无论 AI 敲命令、直接搜、还是走协议——碰到就会用。</div>
+    </div>
+    <div class="card">
+      <h3>结果自己会说话</h3>
+      <p>每次 <code>search</code> 返回的 JSON 里都带一段 <b>_ai_instructions</b>：告诉 AI 这是什么工具、locate 和 expand 怎么选、下一步该 re-run 哪个模式。等于每次结果都附一张说明书。</p>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- ===== 能力矩阵 ===== -->
+  <section>
+    <div class="sec-title">一个工具，全包了</div>
+    <div class="sec-desc">代码搜索 + 文件搜索二合一，AI 不需要在 grep / fd / rg 间来回切：</div>
+    <div class="feat">
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><rect x="4" y="6" width="32" height="28" rx="5" fill="#8FA3AD"/><path d="M12 15h16M12 21h16M12 27h10" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+        <div class="t">代码搜索</div>
+        <div class="d">AST 切块 + BM25 排序，一次给整块</div>
+      </div>
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><rect x="6" y="10" width="22" height="20" rx="4" fill="#C8A9A0"/><path d="M30 16l4 4-4 4" stroke="#C8A9A0" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="t">文件搜索</div>
+        <div class="d">零索引即时搜，<code>file</code> 模式即开即用</div>
+      </div>
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><circle cx="14" cy="20" r="9" fill="#9CAE9B"/><circle cx="26" cy="20" r="9" fill="#9CAE9B" opacity=".55"/></svg>
+        <div class="t">双档输出</div>
+        <div class="d">locate 浅出(指针) / expand 完整块</div>
+      </div>
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><path d="M20 5l13 7v16l-13 7-13-7V12z" fill="none" stroke="#A89AAD" stroke-width="2.4" stroke-linejoin="round"/><circle cx="20" cy="20" r="4" fill="#A89AAD"/></svg>
+        <div class="t">MCP 原生</div>
+        <div class="d">Cursor / Claude Code / CodeBuddy 即插即用</div>
+      </div>
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><rect x="5" y="11" width="30" height="20" rx="3" fill="#B79B8E"/><path d="M14 19l3 3 5-6" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="t">省 token</div>
+        <div class="d">专为 LLM 上下文窗口优化输出</div>
+      </div>
+      <div class="item">
+        <svg class="ic" viewBox="0 0 40 40"><circle cx="13" cy="14" r="6" fill="#8FA3AD"/><circle cx="27" cy="14" r="6" fill="#C8A9A0"/><circle cx="20" cy="28" r="6" fill="#9CAE9B"/></svg>
+        <div class="t">三平台</div>
+        <div class="d">mac / win(免运行库) / linux 一行编</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- ===== 平台 ===== -->
+  <section>
+    <div class="sec-title">带走就能用</div>
+    <div class="plat">
+      <div class="p"><div class="em" style="color:var(--mist-blue-d)">mac</div><div class="s">arm64 · 18MB</div></div>
+      <div class="p"><div class="em" style="color:var(--dust-pink)">win</div><div class="s">静态 CRT · 免运行库</div></div>
+      <div class="p"><div class="em" style="color:var(--sage-d)">linux</div><div class="s">cargo build 一行</div></div>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <h3>它不是「降维打击整个赛道」</h3>
+      <p>说句实话：STS-X 是<b>词法 BM25 检索</b>，不是语义/向量搜索。强在「已知符号、已知模式」的精准定位；想靠意思找「那个做鉴权的函数」，那是 Sourcegraph 的活。<br><br>但它把 AI 老一套「grep + 整文件 Read」真真切切降维了——省下的 80–92% 是实打实的 API 费用，可复现、可审计。</p>
+    </div>
+  </section>
+
+  <!-- ===== 结尾 ===== -->
+  <div class="foot">
+    <a class="gh" href="https://github.com/cscb603/sts-x/releases/tag/v3.0.0">GitHub 下载 v3.0.0 →</a>
+    <div class="by">星TAP实验室软件 · cscb603@qq.com</div>
+    <div class="note">MIT License · 免费开源 · 对 AI 真有用</div>
+  </div>
+
+</div>
+</body>
+</html>

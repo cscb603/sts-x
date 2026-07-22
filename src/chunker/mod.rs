@@ -97,6 +97,12 @@ impl Chunker {
                 continue;
             }
 
+            // Skip noise/backup paths
+            let noise_patterns = ["_backup", "_original", "_old", "_copy", "复制", "副本", ".bak", ".swp", ".tmp"];
+            if noise_patterns.iter().any(|p| rel_str.contains(p)) {
+                continue;
+            }
+
             let lang_name = match extension_to_language(ext) {
                 Some(l) => l,
                 None => continue,

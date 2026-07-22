@@ -20,8 +20,10 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use tantivy::{
     doc,
+    query::{TermQuery, BooleanQuery, Occur, Query},
     schema::*,
     tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter},
+    Term,
     IndexWriter, IndexReader, Index, ReloadPolicy,
     TantivyDocument,
 };
@@ -75,6 +77,19 @@ const SKIP_EXTENSIONS: &[&str] = &[
     "o", "so", "dylib", "dll", "exe", "dmg", "app",
     "wasm", "rlib", "rmeta",
 ];
+
+/// Noise directory/file patterns — paths containing any of these are skipped.
+/// Used to filter out backup copies, old versions, and other junk files.
+const NOISE_PATTERNS: &[&str] = &[
+    "_backup", "_original", "_old", "_copy", "复制", "副本",
+    ".bak", ".swp", ".tmp",
+];
+
+/// Check if a relative path string contains any noise pattern.
+/// Used in all walk/file-scanning functions to skip backups/copies.
+fn is_noise_path(rel_str: &str) -> bool {
+    NOISE_PATTERNS.iter().any(|p| rel_str.contains(p))
+}
 
 impl SearchIndex {
     /// Create a new empty search index
@@ -217,6 +232,11 @@ impl SearchIndex {
                 continue;
             }
 
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             // Skip binary files
             if SKIP_EXTENSIONS.contains(&ext) {
@@ -285,6 +305,11 @@ impl SearchIndex {
                 rel_str.starts_with(pattern) || rel_str.contains("/target/")
                     || rel_str.contains("node_modules") || rel_str.contains(".git")
             }) {
+                continue;
+            }
+
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
                 continue;
             }
 
@@ -357,6 +382,12 @@ impl SearchIndex {
 
             // Check filename first (quick match)
             let rel_str = rel_path.display().to_string();
+
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
             if rel_str.to_lowercase().contains(&query_lower) {
                 results.push(SearchResult {
                     score: 1.0,
@@ -484,6 +515,10 @@ impl SearchIndex {
             }) {
                 continue;
             }
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
 
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
@@ -528,12 +563,45 @@ impl SearchIndex {
         let code_field = self.schema.get_field(FIELD_CODE)?;
         let doc_field = self.schema.get_field(FIELD_DOC_COMMENT)?;
 
-        // Multi-field query
-        let query_parser = tantivy::query::QueryParser::for_index(
-            &self.text_index,
-            vec![name_field, sig_field, code_field, doc_field, path_field],
-        );
-        let tantivy_query = query_parser.parse_query(query)?;
+        // --- Robust query tokenization (fix for `Foo::bar`, `a.b.c`, `Vec<X>`)
+        // Tantivy's QueryParser treats `::` / `(` / `*` etc. as illegal syntax
+        // and REJECTS the whole query (Syntax Error). Code identifiers are full
+        // of these characters, so we instead tokenize the query ourselves with
+        // the SAME rule used at index time (alphanumeric + `_`, everything
+        // Tantivy's SimpleTokenizer splits on `!is_alphanumeric()`, which
+        // includes `_` as a separator. So `select_best_cfg` → {select, best, cfg},
+        // `Cli::parse` → {cli, parse}, `files.len` → {files, len}.
+        // We match exactly this split so TermQueries align with index terms.
+        let mut terms: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .map(|s| s.to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        terms.retain(|t| seen.insert(t.clone()));
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Per-field OR of all terms; fields themselves OR'd. BM25 score ranks
+        // blocks containing more/all terms higher, so precise symbols surface first.
+        let fields = [code_field, name_field, sig_field, doc_field, path_field];
+        let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for field in fields {
+            let mut term_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for term in &terms {
+                let tq = TermQuery::new(
+                    Term::from_field_text(field, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                );
+                term_clauses.push((Occur::Should, Box::new(tq)));
+            }
+            if !term_clauses.is_empty() {
+                let fq: Box<dyn Query> = Box::new(BooleanQuery::new(term_clauses));
+                field_clauses.push((Occur::Should, fq));
+            }
+        }
+        let tantivy_query: Box<dyn Query> = Box::new(BooleanQuery::new(field_clauses));
 
         let top_docs = searcher
             .search(&tantivy_query, &tantivy::collector::TopDocs::with_limit(top_k * 2))?;
