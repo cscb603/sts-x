@@ -620,7 +620,25 @@ impl SearchIndex {
                 e.block.path.display().to_string() == path_str
             }) {
                 // Normalize BM25 score to 0-1 range
-                let norm_score = (score / 10.0).clamp(0.0, 1.0);
+                let mut norm_score = (score / 10.0).clamp(0.0, 1.0);
+
+                // Definition priority boost: +0.3 when the block name contains a query
+                // term AND the block kind is a definition (function/class/struct/etc.)
+                let name_lower = entry.block.name.to_lowercase();
+                let is_definition = matches!(
+                    entry.block.kind,
+                    crate::types::BlockKind::Function
+                        | crate::types::BlockKind::Class
+                        | crate::types::BlockKind::Struct
+                        | crate::types::BlockKind::Method
+                        | crate::types::BlockKind::Enum
+                        | crate::types::BlockKind::Interface
+                        | crate::types::BlockKind::Trait
+                );
+                if is_definition && terms.iter().any(|t| name_lower.contains(t)) {
+                    norm_score += 0.3;
+                }
+
                 results.push((norm_score, entry));
             }
         }
