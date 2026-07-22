@@ -576,6 +576,7 @@ impl SearchIndex {
             .split(|c: char| !c.is_alphanumeric())
             .map(|s| s.to_lowercase())
             .filter(|s| !s.is_empty())
+            .filter(|s| s.len() <= 40)
             .collect();
         let mut seen = std::collections::HashSet::new();
         terms.retain(|t| seen.insert(t.clone()));
