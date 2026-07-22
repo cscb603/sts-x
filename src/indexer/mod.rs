@@ -65,6 +65,7 @@ const FIELD_END_LINE: &str = "end_line";
 /// File extensions treated as code (AST-indexed)
 const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "js", "jsx", "mjs", "ts", "tsx", "go", "java", "c", "cpp", "cc", "cxx", "hpp",
+    "php", "rb", "swift", "scala", "sc",
 ];
 
 /// Binary/text extensions to skip entirely (don't even index path)

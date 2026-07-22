@@ -26,6 +26,10 @@ fn get_language(lang: &str) -> Option<Language> {
         "c" => Some(tree_sitter_c::language()),
         "cpp" => Some(tree_sitter_cpp::language()),
         "go" => Some(tree_sitter_go::language()),
+        "php" => Some(tree_sitter_php::language_php()),
+        "ruby" => Some(tree_sitter_ruby::language()),
+        "swift" => Some(devgen_tree_sitter_swift::language()),
+        "scala" => Some(tree_sitter_scala::language()),
         _ => None,
     }
 }
@@ -41,6 +45,10 @@ fn extension_to_language(ext: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "c" => Some("c"),
         "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        "php" => Some("php"),
+        "rb" => Some("ruby"),
+        "swift" => Some("swift"),
+        "scala" | "sc" => Some("scala"),
         _ => None,
     }
 }
@@ -381,6 +389,10 @@ fn extract_imports(source: &str, language: &str, root_node: &tree_sitter::Node) 
         "javascript" | "typescript" => &["import_statement", "import_require_clause"],
         "go" => &["import_declaration"],
         "java" => &["import_declaration", "package_declaration"],
+        "php" => &["namespace_definition", "use_declaration"],
+        "ruby" => &["require", "include_statement"],
+        "swift" => &["import_declaration"],
+        "scala" => &["import", "package_declaration"],
         _ => return imports,
     };
 

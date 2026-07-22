@@ -183,6 +183,10 @@ impl Default for IndexConfig {
                 "typescript".into(),
                 "go".into(),
                 "java".into(),
+                "php".into(),
+                "ruby".into(),
+                "swift".into(),
+                "scala".into(),
             ],
             exclude_patterns: vec![
                 "node_modules/*".into(),

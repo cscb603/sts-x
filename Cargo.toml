@@ -39,6 +39,11 @@ tree-sitter-java = "0.21"
 tree-sitter-c = "0.21"
 tree-sitter-cpp = "0.21"
 tree-sitter-go = "0.21"
+# New languages (v3.1)
+tree-sitter-php = "0.22"
+tree-sitter-ruby = "0.21"
+tree-sitter-scala = "0.21.0"
+devgen-tree-sitter-swift = "0.21.0"
 ignore = "0.4"
 
 # Path diff
