@@ -586,22 +586,52 @@ impl SearchIndex {
         // Per-field OR of all terms; fields themselves OR'd. BM25 score ranks
         // blocks containing more/all terms higher, so precise symbols surface first.
         let fields = [code_field, name_field, sig_field, doc_field, path_field];
-        let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for field in fields {
-            let mut term_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-            for term in &terms {
-                let tq = TermQuery::new(
-                    Term::from_field_text(field, term),
-                    IndexRecordOption::WithFreqsAndPositions,
-                );
-                term_clauses.push((Occur::Should, Box::new(tq)));
+        let tantivy_query: Box<dyn Query> = if terms.len() >= 3 {
+            // minimum_should_match ≈ N-1: restructure so first (N-1) terms MUST appear
+            // in at least one field (per-term cross-field OR), and the last term is optional.
+            // Tantivy 0.22 lacks native min_should_match, so Must/Should composition
+            // is the only clean way to enforce multi-term precision.
+            let min_match = terms.len() - 1;
+            let per_term: Vec<Box<dyn Query>> = terms.iter().map(|term| {
+                let mut cls: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for &field in &fields {
+                    let tq = TermQuery::new(
+                        Term::from_field_text(field, term),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    );
+                    cls.push((Occur::Should, Box::new(tq)));
+                }
+                Box::new(BooleanQuery::new(cls)) as Box<dyn Query>
+            }).collect();
+
+            let mut outer_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for (i, q) in per_term.into_iter().enumerate() {
+                if i < min_match {
+                    outer_clauses.push((Occur::Must, q));
+                } else {
+                    outer_clauses.push((Occur::Should, q));
+                }
             }
-            if !term_clauses.is_empty() {
-                let fq: Box<dyn Query> = Box::new(BooleanQuery::new(term_clauses));
-                field_clauses.push((Occur::Should, fq));
+            Box::new(BooleanQuery::new(outer_clauses))
+        } else {
+            // 1-2 term queries: original per-field OR structure (correct and efficient)
+            let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for field in fields {
+                let mut term_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for term in &terms {
+                    let tq = TermQuery::new(
+                        Term::from_field_text(field, term),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    );
+                    term_clauses.push((Occur::Should, Box::new(tq)));
+                }
+                if !term_clauses.is_empty() {
+                    let fq: Box<dyn Query> = Box::new(BooleanQuery::new(term_clauses));
+                    field_clauses.push((Occur::Should, fq));
+                }
             }
-        }
-        let tantivy_query: Box<dyn Query> = Box::new(BooleanQuery::new(field_clauses));
+            Box::new(BooleanQuery::new(field_clauses))
+        };
 
         let top_docs = searcher
             .search(&tantivy_query, &tantivy::collector::TopDocs::with_limit(top_k * 2))?;
