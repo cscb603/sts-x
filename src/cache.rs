@@ -22,6 +22,16 @@ fn path_hash(path: &Path) -> String {
 }
 
 pub fn cache_root() -> PathBuf {
+    // 优先使用基座库 core_lib 的跨平台缓存目录实现（与星TAP全家桶保持一致）。
+    // 失败时降级到本地 dirs 实现，保证单二进制分发的健壮性。
+    match core_lib::path::cache_dir("sts-x") {
+        Ok(dir) => dir,
+        Err(_) => fallback_cache_root(),
+    }
+}
+
+// 本地降级实现：仅在基座库不可用时启用，保持与旧行为一致。
+fn fallback_cache_root() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         dirs::cache_dir().unwrap_or_else(|| {
             dirs::home_dir()

@@ -20,6 +20,7 @@ semantic = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+core_lib = { path = "../rust_master_workspace/libs/core_lib", default-features = false, features = ["path"] }
 thiserror = "2"
 
 # Async & HTTP
@@ -52,8 +53,8 @@ pathdiff = "0.2"
 # Encoding fallback for CJK (GBK/GB18030/Big5) on Windows
 encoding_rs = "0.8"
 
-# System directories
-dirs = "5"
+# System directories (aligned with core_lib base lib → dirs 6)
+dirs = "6"
 
 # Full-text search
 tantivy = "0.22"
