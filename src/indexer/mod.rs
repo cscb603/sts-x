@@ -421,10 +421,33 @@ impl SearchIndex {
 
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    // UTF-8 failed → try CJK encodings (GBK, GB18030, Big5) for Windows
+                    match std::fs::read(path) {
+                        Ok(bytes) => {
+                            let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
+                            if decoded.len() > 0 {
+                                decoded.to_string()
+                            } else {
+                                let (decoded, _, _) = encoding_rs::GB18030.decode(&bytes);
+                                if decoded.len() > 0 {
+                                    decoded.to_string()
+                                } else {
+                                    let (decoded, _, _) = encoding_rs::BIG5.decode(&bytes);
+                                    if decoded.len() > 0 {
+                                        decoded.to_string()
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
             };
 
-            if let Some(line_idx) = content.lines().position(|l| l.to_lowercase().contains(&query_lower)) {
+            if let Some(line_idx) = content.lines().position(|l: &str| l.to_lowercase().contains(&query_lower)) {
                 results.push(SearchResult {
                     score: 0.9,
                     block: CodeBlock {

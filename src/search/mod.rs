@@ -235,6 +235,29 @@ impl SearchEngine {
         merged.truncate(query.top_k);
         truncate_by_tokens(&mut merged, query.max_tokens);
 
+        // Step 4: Build locate_matches for --all --locate support
+        // (search_all_files returns SearchResult, but --locate reads locate_matches)
+        let locate_matches: Vec<LocateMatch> = merged
+            .iter()
+            .filter_map(|r| {
+                let block = &r.block;
+                if block.code.is_empty() && block.start_line == 0 {
+                    // filename match — no specific line
+                    None
+                } else {
+                    Some(LocateMatch {
+                        score: r.score,
+                        file: block.path.display().to_string(),
+                        abs_path: block.abs_path.display().to_string(),
+                        line: if block.start_line > 0 { block.start_line } else { 1 },
+                        context: block.code.lines().next().unwrap_or("").chars().take(48).collect(),
+                        kind: block.language.clone(),
+                        name: block.name.clone(),
+                    })
+                }
+            })
+            .collect();
+
         let elapsed = start.elapsed().as_millis() as u64;
 
         Ok(SearchResponse {
@@ -243,7 +266,7 @@ impl SearchEngine {
             results: merged,
             search_time_ms: elapsed,
             multi_hop: None,
-            locate_matches: Vec::new(),
+            locate_matches,
         })
     }
 }

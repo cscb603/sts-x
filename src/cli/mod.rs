@@ -97,6 +97,11 @@ pub enum Commands {
         /// Force using the built-in walker instead of ripgrep
         #[arg(long)]
         no_rg: bool,
+        /// Cap total output to roughly this many tokens (0 = unlimited).
+        /// Estimation: (char_count + 1) / 2. Results are truncated by dropping
+        /// lowest-score entries until the budget is met.
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
     },
     /// Start MCP HTTP server (auto-indexes, supports multi-project via "path" field)
     Serve {
@@ -139,12 +144,12 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             };
             cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens).await
         }
-        Commands::File { query, path, name_only, top_k, no_rg } => {
+        Commands::File { query, path, name_only, top_k, no_rg, max_tokens } => {
             let p = match path {
                 Some(p) => normalize_path(p),
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
-            cmd_file(&query, &p, *name_only, *top_k, *no_rg).await
+            cmd_file(&query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
         }
         Commands::Serve { path, index_path, host, port } => {
             let p = resolve_path(path);
@@ -321,13 +326,32 @@ async fn cmd_file(
     name_only: bool,
     top_k: usize,
     no_rg: bool,
+    max_tokens: usize,
 ) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     let matches = crate::filesearch::search_files(query_str, dir, name_only, top_k, !no_rg)?;
     let elapsed = start.elapsed().as_millis() as u64;
+
+    // Apply max_tokens truncation: estimate token count from context fields
+    let out_matches: Vec<crate::types::FileMatch> = if max_tokens > 0 {
+        let mut total: usize = 0;
+        let mut truncated = Vec::new();
+        for m in matches {
+            let tok = (m.context.chars().count() + 1) / 2;
+            if total + tok > max_tokens && !truncated.is_empty() {
+                break;
+            }
+            total += tok;
+            truncated.push(m);
+        }
+        truncated
+    } else {
+        matches
+    };
+
     let out = crate::types::format::AiFileOutput::from_matches(
         query_str.to_string(),
-        matches,
+        out_matches,
         elapsed,
     );
     // total_hits is the actual match count
