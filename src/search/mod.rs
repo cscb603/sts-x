@@ -45,7 +45,9 @@ impl SearchEngine {
             SearchMode::Filename => self.search_filename_mode(&query),
             SearchMode::All => self.search_all_mode(&query),
             SearchMode::Code => {
-                if matches!(query.output_mode, crate::types::OutputMode::Locate) {
+                // None (unspecified) defaults to Expand; entry points resolve
+                // auto-routing before reaching the engine (see src/router.rs).
+                if matches!(query.output_mode, Some(crate::types::OutputMode::Locate)) {
                     self.search_code_locate(&query)
                 } else {
                     self.search_code_mode(&query)
@@ -154,6 +156,42 @@ impl SearchEngine {
     /// Code search (AST chunks, BM25 + optional embedding)
     fn search_code_mode(&mut self, query: &SearchQuery) -> Result<SearchResponse> {
         let start = Instant::now();
+
+        // ── R2: symbol fast path ─────────────────────────────────────
+        // A symbol-like query (e.g. `run_search`, `cache::detect_project_root`)
+        // whose exact chunk name exists in the index returns those blocks
+        // directly — focused results instead of BM25 term-scatter. Queries
+        // without an exact name hit fall through to the hybrid path below.
+        if crate::router::is_symbol(&query.query) {
+            let q = query.query.trim();
+            // `mod::path::name` → compare against the trailing segment
+            let needle = q.rsplit("::").next().unwrap_or(q);
+            let mut exact: Vec<SearchResult> = self
+                .index
+                .all_blocks()
+                .iter()
+                .filter(|ib| ib.block.name == needle)
+                .map(|ib| SearchResult {
+                    score: 1.0,
+                    block: ib.block.clone(),
+                    highlight_lines: Vec::new(),
+                    explanation: "exact symbol match".to_string(),
+                })
+                .collect();
+            if !exact.is_empty() {
+                exact.truncate(query.top_k.max(1));
+                truncate_by_tokens(&mut exact, query.max_tokens);
+                let elapsed = start.elapsed().as_millis() as u64;
+                return Ok(SearchResponse {
+                    query: query.query.clone(),
+                    total_hits: exact.len(),
+                    results: exact,
+                    search_time_ms: elapsed,
+                    multi_hop: None,
+                    locate_matches: Vec::new(),
+                });
+            }
+        }
 
         let query_embedding = self.embed_model.as_mut().and_then(|m| {
             let query_text = format!("query: {}", query.query);

@@ -89,7 +89,9 @@ pub fn detect_project_root(start: &Path) -> PathBuf {
     loop {
         for marker in PROJECT_MARKERS {
             if dir.join(marker).exists() {
-                return dir;
+                // R4: a Cargo workspace member escalates to the workspace root
+                // (guardrailed: depth≤8, stops at .stsx-root, never $HOME or /).
+                return escalate_to_workspace_root(dir);
             }
         }
         match dir.parent() {
@@ -97,6 +99,57 @@ pub fn detect_project_root(start: &Path) -> PathBuf {
             _ => return canonical,
         }
     }
+}
+
+/// R4 (v0.4): if `found` is a Cargo workspace member, climb to the real
+/// workspace root so searches inside one member cover all members.
+///
+/// BM25 guardrails (whitepaper §7.4 — this must NEVER become a global search):
+/// - climbs at most 8 levels (same cap as `has_newer_files`);
+/// - `.stsx-root` marker stops the climb immediately (explicit user pin);
+/// - never escalates to `$HOME` or the filesystem root;
+/// - only escalates when an ancestor `Cargo.toml` actually declares
+///   `[workspace]` — otherwise returns `found` unchanged (project-level).
+fn escalate_to_workspace_root(found: PathBuf) -> PathBuf {
+    // Explicit pin or non-Cargo project → no escalation.
+    if found.join(".stsx-root").exists() || !found.join("Cargo.toml").exists() {
+        return found;
+    }
+    // Already a workspace root (own Cargo.toml declares [workspace]).
+    if cargo_toml_declares_workspace(&found.join("Cargo.toml")) {
+        return found;
+    }
+
+    let home = dirs::home_dir();
+    let mut dir = found.clone();
+    for _ in 0..8 {
+        let parent = match dir.parent() {
+            Some(p) if p != dir => p.to_path_buf(),
+            _ => break,
+        };
+        // Hard stop: never treat $HOME or / as a workspace root.
+        if home.as_deref() == Some(parent.as_path()) || parent.parent().is_none() {
+            break;
+        }
+        // .stsx-root on an ancestor pins that ancestor as the root.
+        if parent.join(".stsx-root").exists() {
+            return parent;
+        }
+        let manifest = parent.join("Cargo.toml");
+        if manifest.exists() && cargo_toml_declares_workspace(&manifest) {
+            return parent;
+        }
+        dir = parent;
+    }
+    found
+}
+
+/// True if the Cargo.toml at `path` declares a `[workspace]` table
+/// (also matches `[workspace.members]` / `[workspace.dependencies]` headers).
+fn cargo_toml_declares_workspace(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().any(|l| l.trim_start().starts_with("[workspace")))
+        .unwrap_or(false)
 }
 
 const SKIP_DIRS: &[&str] = &[

@@ -1,8 +1,8 @@
 [package]
 name = "sts-x"
-version = "3.1.2"
+version = "3.2.0"
 edition = "2021"
-description = "STS-X 3.0: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
+description = "STS-X 3.2: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
 authors = ["星TAP实验室软件 <cscb603@qq.com>"]
 homepage = "https://github.com/cscb603/sts-x"
 repository = "https://github.com/cscb603/sts-x"
@@ -20,12 +20,11 @@ semantic = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-core_lib = { path = "../rust_master_workspace/libs/core_lib", default-features = false, features = ["path"] }
+core_lib = { path = "../rust_master_workspace/libs/core_lib", default-features = false, features = ["path", "mcp"] }
 thiserror = "2"
 
-# Async & HTTP
+# Async runtime (axum/HTTP framework now provided by core_lib::mcp, re-exported)
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

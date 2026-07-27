@@ -14,7 +14,7 @@
 use crate::types::{FileMatch, LocateMatch, SearchResponse, SearchResult};
 use serde::Serialize;
 
-const AI_HINT: &str = concat!(
+pub const AI_HINT: &str = concat!(
     "I am STS-X ",
     env!("CARGO_PKG_VERSION"),
     ", an AI-native unified code+file search engine. CLI: sts-x search \"q\" (code, --expand full block default | --locate line-level grep-sized), sts-x file \"q\" [--path DIR] (filename+content, zero-index via rg), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results), --path DIR. MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"output_mode\":\"expand|locate\",\"top_k\":3} to /search; POST {\"query\":\"...\",\"path\":\"/abs/dir\",\"content\":true,\"top_k\":10} to /file. Response: abs_path+lines=read location, score=relevance. locate: each match is a line (grep-sized, ~130 tok) — need the full block? re-run with output_mode=expand on that symbol. expand: code=full block."
@@ -23,13 +23,31 @@ const AI_HINT: &str = concat!(
 #[derive(Debug, Serialize)]
 pub struct AiSearchOutput {
     pub query: String,
+    /// R1 (v0.4): discriminator field ("expand") so AI can deterministically
+    /// parse CLI and MCP responses the same way (locate output carries "locate").
+    pub mode: &'static str,
     pub results: Vec<AiResultItem>,
     pub total_hits: usize,
     pub search_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_hop: Option<Vec<AiMultiHopStep>>,
+    /// R3 (v0.4): hot-symbol aggregation. When one symbol name matches blocks
+    /// in many files, the flat listing is folded into per-symbol groups
+    /// (`file_count` + top-3 by score) — same shape on CLI and MCP paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregated: Option<Vec<AiAggregateGroup>>,
     #[serde(rename = "_ai_instructions")]
     pub _ai_instructions: &'static str,
+}
+
+/// R3: one aggregated group — a symbol that matched across multiple blocks/files.
+#[derive(Debug, Serialize)]
+pub struct AiAggregateGroup {
+    pub symbol: String,
+    pub file_count: usize,
+    /// Total matched blocks folded into this group (before top-3 cut).
+    pub match_count: usize,
+    pub top: Vec<AiResultItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +76,7 @@ impl From<SearchResponse> for AiSearchOutput {
     fn from(resp: SearchResponse) -> Self {
         AiSearchOutput {
             query: resp.query,
+            mode: "expand",
             results: resp.results.into_iter().map(Into::into).collect(),
             total_hits: resp.total_hits,
             search_time_ms: resp.search_time_ms,
@@ -71,6 +90,7 @@ impl From<SearchResponse> for AiSearchOutput {
                     })
                     .collect()
             }),
+            aggregated: None, // filled by postprocess::aggregate_results (R3)
             _ai_instructions: AI_HINT,
         }
     }

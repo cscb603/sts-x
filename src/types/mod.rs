@@ -90,8 +90,10 @@ pub struct SearchQuery {
     #[serde(default)]
     pub mode: SearchMode,
     /// 3.0: progressive-disclosure output. Expand=full block, Locate=line-level.
+    /// R1 (v0.4): `None` = caller did not specify → entry points (CLI `ai` /
+    /// MCP `search`) auto-route via `router::classify`. `Some(_)` = explicit.
     #[serde(default)]
-    pub output_mode: OutputMode,
+    pub output_mode: Option<OutputMode>,
     #[serde(default)]
     pub languages: Option<Vec<String>>,
     #[serde(default)]
@@ -124,7 +126,7 @@ impl Default for SearchQuery {
         Self {
             query: String::new(),
             mode: SearchMode::default(),
-            output_mode: OutputMode::default(),
+            output_mode: None,
             languages: None,
             path_filter: None,
             top_k: 2,

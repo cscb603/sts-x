@@ -80,6 +80,18 @@ pub enum Commands {
         #[arg(long, default_value = "0")]
         max_tokens: usize,
     },
+    /// AI one-shot search (CLI path): auto-routes symbol→locate, NL→expand+budget.
+    /// Shares src/router.rs with the MCP `search` tool — identical behavior on both paths.
+    Ai {
+        /// Query: bare symbol (e.g. "run_search") or natural language description
+        query: String,
+        /// Project root path (default: auto-detected from current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        /// Override the auto token budget (0 = use router default)
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
+    },
     /// File search: filename + content across ANY directory (no index needed).
     /// Uses ripgrep if available, else a gitignore-aware walk. Zero-config.
     File {
@@ -144,6 +156,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             };
             cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens).await
         }
+        Commands::Ai { query, path, max_tokens } => {
+            let p = resolve_path(path);
+            run_ai(query, &p, *max_tokens).await
+        }
         Commands::File { query, path, name_only, top_k, no_rg, max_tokens } => {
             let p = match path {
                 Some(p) => normalize_path(p),
@@ -160,6 +176,31 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             cmd_status(&p, index_path.as_ref()).await
         }
     }
+}
+
+/// R1: AI one-shot entry (CLI path). Classifies the query via the shared
+/// `router` module (same logic as the MCP `search` tool) and reuses the
+/// existing `cmd_search` pipeline — no duplicated search logic.
+async fn run_ai(query: &str, root: &Path, max_tokens_override: usize) -> anyhow::Result<()> {
+    let decision = crate::router::classify(query);
+    let max_tokens = if max_tokens_override > 0 {
+        max_tokens_override
+    } else {
+        decision.max_tokens
+    };
+    cmd_search(
+        query,
+        root,
+        None,               // index_path: default cache dir
+        false,              // filename mode
+        false,              // all mode
+        decision.output_mode,
+        decision.top_k,
+        0,                  // context_lines: full block for expand
+        false,              // human output: JSON for AI
+        max_tokens,
+    )
+    .await
 }
 
 /// Normalize POSIX-style paths for Windows (e.g. /c/Users → C:\Users)
@@ -292,7 +333,7 @@ async fn cmd_search(
     let query = SearchQuery {
         query: query_str.to_string(),
         mode,
-        output_mode,
+        output_mode: Some(output_mode),
         top_k,
         context_lines,
         max_tokens,
@@ -310,7 +351,9 @@ async fn cmd_search(
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
     } else {
         postprocess::post_process_results(&mut response, query_str, context_lines);
-        let ai_output: crate::types::format::AiSearchOutput = response.into();
+        let mut ai_output: crate::types::format::AiSearchOutput = response.into();
+        // R3: fold hot symbols (same shape on CLI and MCP paths).
+        postprocess::aggregate_results(&mut ai_output);
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
     }
 

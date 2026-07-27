@@ -17,15 +17,16 @@ use crate::search::SearchEngine;
 use crate::types::{IndexConfig, SearchMode, SearchQuery};
 use crate::types::format::{AiFileOutput, AiLocateOutput, AiSearchOutput};
 use crate::cache;
-use axum::{
+// HTTP 框架统一由 core_lib::mcp 提供并重新导出（不再直接依赖 axum，见白皮书 §2）。
+use core_lib::mcp::axum::{
     extract::State,
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
+use core_lib::mcp::{McpServer, Tool};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::net::SocketAddr;
 use tokio::sync::Mutex;
 
 struct ProjectEngine {
@@ -40,11 +41,21 @@ pub struct AppState {
 }
 
 /// Unified search response (expand or locate JSON shape).
-#[derive(serde::Serialize)]
-#[serde(untagged)]
+/// R1 (v0.4 §7.5): no `#[serde(untagged)]` — serialization delegates to the
+/// inner payload, which now carries an explicit `"mode": "expand"|"locate"`
+/// discriminator field, so AI parses CLI and MCP responses identically.
 enum AiResponse {
     Expand(AiSearchOutput),
     Locate(AiLocateOutput),
+}
+
+impl serde::Serialize for AiResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            AiResponse::Expand(out) => out.serialize(serializer),
+            AiResponse::Locate(out) => out.serialize(serializer),
+        }
+    }
 }
 
 /// Body for the MCP `/file` endpoint.
@@ -76,20 +87,60 @@ pub async fn serve(default_root: &Path, custom_index: Option<&PathBuf>, host: &s
         default_index_path: custom_index.cloned(),
     });
 
-    let app = Router::new()
+    // 业务路由（/search /file handler 保持原样，见白皮书 §2）
+    let biz = Router::new()
         .route("/search", post(handle_search))
         .route("/file", post(handle_file))
-        .route("/health", get(handle_health))
-        .route("/tools", get(handle_tools))
-        .route("/", get(handle_root))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
-    tracing::info!("STS-X server listening on http://{}", addr);
+    // /health、/tools、/ 三个“壳层”交由 core_lib::mcp::McpServer 自动生成
+    McpServer::new("sts-x", env!("CARGO_PKG_VERSION"), crate::types::format::AI_HINT)
+        .tool(search_tool_schema())
+        .tool(file_tool_schema())
+        .merge(biz)
+        .serve(host, port)
+        .await
+}
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+/// `search` 工具的 MCP Schema（原 handle_tools 内容，迁移到 core_lib McpServer 声明）。
+fn search_tool_schema() -> Tool {
+    Tool::new(
+        "search",
+        "Unified code search (STS-X 3.0). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Or set output_mode explicitly. Response carries a \"mode\" discriminator field.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query (natural language or code fragment)" },
+                "mode": { "type": "string", "enum": ["code", "filename", "all"], "description": "code=AST-aware code search, filename=file name match, all=everything" },
+                "output_mode": { "type": "string", "enum": ["expand", "locate"], "description": "expand=full AST block (default, for read/modify); locate=line-level grep-sized hits (~130 tok) for first-pass location" },
+                "path": { "type": "string", "description": "Project root (auto-detected if omitted)" },
+                "top_k": { "type": "integer", "description": "Number of results (default 2)", "default": 2 },
+                "context_lines": { "type": "integer", "description": "Lines around each match in expand mode (default 0 = full block, >0 = window)", "default": 0 },
+                "filename": { "type": "boolean", "description": "Shortcut: search file names only" },
+                "all": { "type": "boolean", "description": "Shortcut: search all files" }
+            },
+            "required": ["query"]
+        }),
+    )
+}
+
+/// `file` 工具的 MCP Schema。
+fn file_tool_schema() -> Tool {
+    Tool::new(
+        "file",
+        "File search across ANY directory (no index needed). Searches filename + content via ripgrep (or built-in walker). Perfect for locating assets/configs/prompts in unindexed dirs like ~/Downloads.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Filename fragment or content term" },
+                "path": { "type": "string", "description": "Directory to search (default: server cwd)" },
+                "content": { "type": "boolean", "description": "Also match file content (default true). Set false for name-only.", "default": true },
+                "name_only": { "type": "boolean", "description": "Alias for content=false (name match only)" },
+                "top_k": { "type": "integer", "description": "Maximum results (default 20)", "default": 20 }
+            },
+            "required": ["query"]
+        }),
+    )
 }
 
 async fn get_or_create_engine(
@@ -166,10 +217,12 @@ async fn handle_search(
             tracing::error!("Failed to get engine: {:?}", e);
             return Json(AiResponse::Expand(AiSearchOutput {
                 query: query.query.clone(),
+                mode: "expand",
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
+                aggregated: None,
                 _ai_instructions: "error: failed to initialize search engine",
             }));
         }
@@ -181,10 +234,12 @@ async fn handle_search(
         None => {
             return Json(AiResponse::Expand(AiSearchOutput {
                 query: query.query.clone(),
+                mode: "expand",
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
+                aggregated: None,
                 _ai_instructions: "error: engine not found",
             }));
         }
@@ -192,6 +247,19 @@ async fn handle_search(
 
     let mut search_query = query.clone();
     search_query.mode = mode;
+
+    // R1 (v0.4): auto-route when caller omitted output_mode — shared router
+    // module, identical behavior to the CLI `ai` subcommand.
+    if search_query.output_mode.is_none() && matches!(search_query.mode, SearchMode::Code) {
+        let decision = crate::router::classify(&search_query.query);
+        search_query.output_mode = Some(decision.output_mode);
+        // Widen the candidate pool for symbol→locate; never shrink explicit top_k.
+        search_query.top_k = search_query.top_k.max(decision.top_k);
+        if search_query.max_tokens == 0 {
+            search_query.max_tokens = decision.max_tokens;
+        }
+    }
+
     if search_query.top_k == 0 {
         search_query.top_k = 2;
     }
@@ -199,7 +267,7 @@ async fn handle_search(
 
     let context_lines = search_query.context_lines;
     let query_str = search_query.query.clone();
-    let is_locate = matches!(search_query.output_mode, crate::types::OutputMode::Locate);
+    let is_locate = matches!(search_query.output_mode, Some(crate::types::OutputMode::Locate));
 
     match pe.engine.search(search_query) {
         Ok(mut resp) => {
@@ -207,17 +275,22 @@ async fn handle_search(
                 Json(AiResponse::Locate(resp.into()))
             } else {
                 postprocess::post_process_results(&mut resp, &query_str, context_lines);
-                Json(AiResponse::Expand(resp.into()))
+                let mut out: AiSearchOutput = resp.into();
+                // R3: fold hot symbols (same shape on CLI and MCP paths).
+                postprocess::aggregate_results(&mut out);
+                Json(AiResponse::Expand(out))
             }
         }
         Err(e) => {
             tracing::error!("Search error: {:?}", e);
             Json(AiResponse::Expand(AiSearchOutput {
                 query: query_str,
+                mode: "expand",
                 results: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
                 multi_hop: None,
+                aggregated: None,
                 _ai_instructions: "error: search failed",
             }))
         }
@@ -260,110 +333,3 @@ async fn handle_file(
     Json(out)
 }
 
-async fn handle_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "service": "sts-x"
-    }))
-}
-
-async fn handle_tools() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "tools": [
-            {
-                "name": "search",
-                "description": "Unified code search (STS-X 3.0). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Use output_mode=locate for grep-sized line hits (cheap), or expand (default) for full code blocks.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query (natural language or code fragment)"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["code", "filename", "all"],
-                            "description": "code=AST-aware code search, filename=file name match, all=everything"
-                        },
-                        "output_mode": {
-                            "type": "string",
-                            "enum": ["expand", "locate"],
-                            "description": "expand=full AST block (default, for read/modify); locate=line-level grep-sized hits (~130 tok) for first-pass location"
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "Project root (auto-detected if omitted)"
-                        },
-                        "top_k": {
-                            "type": "integer",
-                            "description": "Number of results (default 2)",
-                            "default": 2
-                        },
-                        "context_lines": {
-                            "type": "integer",
-                            "description": "Lines around each match in expand mode (default 0 = full block, >0 = window)",
-                            "default": 0
-                        },
-                        "filename": {
-                            "type": "boolean",
-                            "description": "Shortcut: search file names only"
-                        },
-                        "all": {
-                            "type": "boolean",
-                            "description": "Shortcut: search all files"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "file",
-                "description": "File search across ANY directory (no index needed). Searches filename + content via ripgrep (or built-in walker). Perfect for locating assets/configs/prompts in unindexed dirs like ~/Downloads.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Filename fragment or content term"
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "Directory to search (default: server cwd)"
-                        },
-                        "content": {
-                            "type": "boolean",
-                            "description": "Also match file content (default true). Set false for name-only.",
-                            "default": true
-                        },
-                        "name_only": {
-                            "type": "boolean",
-                            "description": "Alias for content=false (name match only)"
-                        },
-                        "top_k": {
-                            "type": "integer",
-                            "description": "Maximum results (default 20)",
-                            "default": 20
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        ]
-    }))
-}
-
-async fn handle_root() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "service": "sts-x",
-        "version": env!("CARGO_PKG_VERSION"),
-        "endpoints": {
-            "/health": "GET — service health",
-            "/tools": "GET — tool discovery (MCP schema)",
-            "/search": "POST — code search (application/json)"
-        },
-        "quick_start": {
-            "example_curl": "curl -X POST http://127.0.0.1:9876/search -H 'Content-Type: application/json' -d '{\"query\":\"search function\",\"top_k\":3,\"context_lines\":5}'"
-        }
-    }))
-}

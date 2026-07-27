@@ -8,6 +8,7 @@ pub mod embed;
 pub mod filesearch;
 pub mod indexer;
 pub mod postprocess;
+pub mod router;
 pub mod search;
 pub mod server;
 pub mod types;
