@@ -12,15 +12,18 @@
  * For larger scale, a dedicated vector DB can be swapped in.
  */
 
-use crate::types::{CodeBlock, IndexConfig, SearchResult};
+use crate::types::{CodeBlock, IndexConfig, LocateMatch, SearchResult};
+use std::collections::HashSet;
 use crate::embed::EmbeddingModel;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use tantivy::{
     doc,
+    query::{TermQuery, BooleanQuery, Occur, Query},
     schema::*,
     tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter},
+    Term,
     IndexWriter, IndexReader, Index, ReloadPolicy,
     TantivyDocument,
 };
@@ -62,6 +65,7 @@ const FIELD_END_LINE: &str = "end_line";
 /// File extensions treated as code (AST-indexed)
 const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "js", "jsx", "mjs", "ts", "tsx", "go", "java", "c", "cpp", "cc", "cxx", "hpp",
+    "php", "rb", "swift", "scala", "sc",
 ];
 
 /// Binary/text extensions to skip entirely (don't even index path)
@@ -74,6 +78,19 @@ const SKIP_EXTENSIONS: &[&str] = &[
     "o", "so", "dylib", "dll", "exe", "dmg", "app",
     "wasm", "rlib", "rmeta",
 ];
+
+/// Noise directory/file patterns — paths containing any of these are skipped.
+/// Used to filter out backup copies, old versions, and other junk files.
+const NOISE_PATTERNS: &[&str] = &[
+    "_backup", "_original", "_old", "_copy", "复制", "副本",
+    ".bak", ".swp", ".tmp",
+];
+
+/// Check if a relative path string contains any noise pattern.
+/// Used in all walk/file-scanning functions to skip backups/copies.
+fn is_noise_path(rel_str: &str) -> bool {
+    NOISE_PATTERNS.iter().any(|p| rel_str.contains(p))
+}
 
 impl SearchIndex {
     /// Create a new empty search index
@@ -216,6 +233,11 @@ impl SearchIndex {
                 continue;
             }
 
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             // Skip binary files
             if SKIP_EXTENSIONS.contains(&ext) {
@@ -284,6 +306,11 @@ impl SearchIndex {
                 rel_str.starts_with(pattern) || rel_str.contains("/target/")
                     || rel_str.contains("node_modules") || rel_str.contains(".git")
             }) {
+                continue;
+            }
+
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
                 continue;
             }
 
@@ -356,6 +383,12 @@ impl SearchIndex {
 
             // Check filename first (quick match)
             let rel_str = rel_path.display().to_string();
+
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
             if rel_str.to_lowercase().contains(&query_lower) {
                 results.push(SearchResult {
                     score: 1.0,
@@ -388,10 +421,33 @@ impl SearchIndex {
 
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    // UTF-8 failed → try CJK encodings (GBK, GB18030, Big5) for Windows
+                    match std::fs::read(path) {
+                        Ok(bytes) => {
+                            let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
+                            if decoded.len() > 0 {
+                                decoded.to_string()
+                            } else {
+                                let (decoded, _, _) = encoding_rs::GB18030.decode(&bytes);
+                                if decoded.len() > 0 {
+                                    decoded.to_string()
+                                } else {
+                                    let (decoded, _, _) = encoding_rs::BIG5.decode(&bytes);
+                                    if decoded.len() > 0 {
+                                        decoded.to_string()
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
             };
 
-            if let Some(line_idx) = content.lines().position(|l| l.to_lowercase().contains(&query_lower)) {
+            if let Some(line_idx) = content.lines().position(|l: &str| l.to_lowercase().contains(&query_lower)) {
                 results.push(SearchResult {
                     score: 0.9,
                     block: CodeBlock {
@@ -420,6 +476,108 @@ impl SearchIndex {
         Ok(results)
     }
 
+    /// Live grep over CODE files only (gitignore-aware, binary-skipping).
+    ///
+    /// Returns grep-sized line hits capped at `top_k` as `LocateMatch`, skipping
+    /// any relative path already present in `skip_paths`. Used by locate mode as a
+    /// **budget-capped** fallback when BM25 under-delivers (e.g. the best hit is
+    /// in a code file the chunker missed, or an unindexed path).
+    ///
+    /// Unlike `search_all_files`, this searches CODE files (the old locate
+    /// fallback skipped them, so code queries fell through to `.md` docs and
+    /// blew the token budget).
+    pub fn search_code_live(
+        &self,
+        terms: &[String],
+        top_k: usize,
+        skip_paths: &HashSet<String>,
+    ) -> Result<Vec<LocateMatch>> {
+        let mut out: Vec<LocateMatch> = Vec::new();
+        if terms.is_empty() || top_k == 0 {
+            return Ok(out);
+        }
+
+        let walker = ignore::WalkBuilder::new(&self.config.project_root)
+            .git_ignore(true)
+            .parents(true)
+            .standard_filters(true)
+            .build();
+
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let is_file = entry.file_type().map(|f| f.is_file()).unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !CODE_EXTENSIONS.contains(&ext.as_str()) {
+                continue;
+            }
+
+            let rel_path = pathdiff::diff_paths(path, &self.config.project_root)
+                .unwrap_or_else(|| path.to_path_buf());
+            let rel_str = rel_path.display().to_string();
+            if skip_paths.contains(&rel_str) {
+                continue;
+            }
+            // Skip excluded patterns
+            if self.config.exclude_patterns.iter().any(|p| {
+                let pattern = p.trim_end_matches("/*");
+                rel_str.starts_with(pattern)
+                    || rel_str.contains("/target/")
+                    || rel_str.contains("node_modules")
+                    || rel_str.contains(".git")
+            }) {
+                continue;
+            }
+            // Skip noise/backup paths
+            if is_noise_path(&rel_str) {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // First line containing any term → one grep-sized hit for this file.
+            if let Some((idx, line)) = content.lines().enumerate().find(|(_, l)| {
+                let low = l.to_lowercase();
+                terms.iter().any(|t| low.contains(t))
+            }) {
+                let trimmed = line.trim();
+                let ctx: String = if trimmed.chars().count() > 48 {
+                    format!("{}…", trimmed.chars().take(48).collect::<String>())
+                } else {
+                    trimmed.to_string()
+                };
+                out.push(LocateMatch {
+                    score: 0.85,
+                    file: rel_str,
+                    abs_path: path.display().to_string(),
+                    line: idx + 1,
+                    context: ctx,
+                    kind: ext,
+                    name: String::new(),
+                });
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Search via BM25 full-text
     pub fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<(f32, &IndexedBlock)>> {
         let searcher = self.text_reader.searcher();
@@ -429,12 +587,76 @@ impl SearchIndex {
         let code_field = self.schema.get_field(FIELD_CODE)?;
         let doc_field = self.schema.get_field(FIELD_DOC_COMMENT)?;
 
-        // Multi-field query
-        let query_parser = tantivy::query::QueryParser::for_index(
-            &self.text_index,
-            vec![name_field, sig_field, code_field, doc_field, path_field],
-        );
-        let tantivy_query = query_parser.parse_query(query)?;
+        // --- Robust query tokenization (fix for `Foo::bar`, `a.b.c`, `Vec<X>`)
+        // Tantivy's QueryParser treats `::` / `(` / `*` etc. as illegal syntax
+        // and REJECTS the whole query (Syntax Error). Code identifiers are full
+        // of these characters, so we instead tokenize the query ourselves with
+        // the SAME rule used at index time (alphanumeric + `_`, everything
+        // Tantivy's SimpleTokenizer splits on `!is_alphanumeric()`, which
+        // includes `_` as a separator. So `select_best_cfg` → {select, best, cfg},
+        // `Cli::parse` → {cli, parse}, `files.len` → {files, len}.
+        // We match exactly this split so TermQueries align with index terms.
+        let mut terms: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .map(|s| s.to_lowercase())
+            .filter(|s| !s.is_empty())
+            .filter(|s| s.len() <= 40)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        terms.retain(|t| seen.insert(t.clone()));
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Per-field OR of all terms; fields themselves OR'd. BM25 score ranks
+        // blocks containing more/all terms higher, so precise symbols surface first.
+        let fields = [code_field, name_field, sig_field, doc_field, path_field];
+        let tantivy_query: Box<dyn Query> = if terms.len() >= 3 {
+            // minimum_should_match ≈ N-1: restructure so first (N-1) terms MUST appear
+            // in at least one field (per-term cross-field OR), and the last term is optional.
+            // Tantivy 0.22 lacks native min_should_match, so Must/Should composition
+            // is the only clean way to enforce multi-term precision.
+            let min_match = terms.len() - 1;
+            let per_term: Vec<Box<dyn Query>> = terms.iter().map(|term| {
+                let mut cls: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for &field in &fields {
+                    let tq = TermQuery::new(
+                        Term::from_field_text(field, term),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    );
+                    cls.push((Occur::Should, Box::new(tq)));
+                }
+                Box::new(BooleanQuery::new(cls)) as Box<dyn Query>
+            }).collect();
+
+            let mut outer_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for (i, q) in per_term.into_iter().enumerate() {
+                if i < min_match {
+                    outer_clauses.push((Occur::Must, q));
+                } else {
+                    outer_clauses.push((Occur::Should, q));
+                }
+            }
+            Box::new(BooleanQuery::new(outer_clauses))
+        } else {
+            // 1-2 term queries: original per-field OR structure (correct and efficient)
+            let mut field_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+            for field in fields {
+                let mut term_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for term in &terms {
+                    let tq = TermQuery::new(
+                        Term::from_field_text(field, term),
+                        IndexRecordOption::WithFreqsAndPositions,
+                    );
+                    term_clauses.push((Occur::Should, Box::new(tq)));
+                }
+                if !term_clauses.is_empty() {
+                    let fq: Box<dyn Query> = Box::new(BooleanQuery::new(term_clauses));
+                    field_clauses.push((Occur::Should, fq));
+                }
+            }
+            Box::new(BooleanQuery::new(field_clauses))
+        };
 
         let top_docs = searcher
             .search(&tantivy_query, &tantivy::collector::TopDocs::with_limit(top_k * 2))?;
@@ -453,7 +675,25 @@ impl SearchIndex {
                 e.block.path.display().to_string() == path_str
             }) {
                 // Normalize BM25 score to 0-1 range
-                let norm_score = (score / 10.0).clamp(0.0, 1.0);
+                let mut norm_score = (score / 10.0).clamp(0.0, 1.0);
+
+                // Definition priority boost: +0.3 when the block name contains a query
+                // term AND the block kind is a definition (function/class/struct/etc.)
+                let name_lower = entry.block.name.to_lowercase();
+                let is_definition = matches!(
+                    entry.block.kind,
+                    crate::types::BlockKind::Function
+                        | crate::types::BlockKind::Class
+                        | crate::types::BlockKind::Struct
+                        | crate::types::BlockKind::Method
+                        | crate::types::BlockKind::Enum
+                        | crate::types::BlockKind::Interface
+                        | crate::types::BlockKind::Trait
+                );
+                if is_definition && terms.iter().any(|t| name_lower.contains(t)) {
+                    norm_score += 0.3;
+                }
+
                 results.push((norm_score, entry));
             }
         }

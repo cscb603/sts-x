@@ -26,6 +26,10 @@ fn get_language(lang: &str) -> Option<Language> {
         "c" => Some(tree_sitter_c::language()),
         "cpp" => Some(tree_sitter_cpp::language()),
         "go" => Some(tree_sitter_go::language()),
+        "php" => Some(tree_sitter_php::language_php()),
+        "ruby" => Some(tree_sitter_ruby::language()),
+        "swift" => Some(devgen_tree_sitter_swift::language()),
+        "scala" => Some(tree_sitter_scala::language()),
         _ => None,
     }
 }
@@ -41,6 +45,10 @@ fn extension_to_language(ext: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "c" => Some("c"),
         "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        "php" => Some("php"),
+        "rb" => Some("ruby"),
+        "swift" => Some("swift"),
+        "scala" | "sc" => Some("scala"),
         _ => None,
     }
 }
@@ -94,6 +102,12 @@ impl Chunker {
                 let pattern = p.trim_end_matches("/*");
                 rel_str.starts_with(pattern) || rel_str.contains("/target/")
             }) {
+                continue;
+            }
+
+            // Skip noise/backup paths
+            let noise_patterns = ["_backup", "_original", "_old", "_copy", "复制", "副本", ".bak", ".swp", ".tmp"];
+            if noise_patterns.iter().any(|p| rel_str.contains(p)) {
                 continue;
             }
 
@@ -187,7 +201,12 @@ impl Chunker {
         Ok(blocks)
     }
 
-    /// Recursively walk AST tree and collect named code blocks
+    /// Recursively walk AST tree and collect named code blocks.
+    /// Uses the canonical tree-sitter cursor pattern: descend into the first
+    /// child, recurse, walk siblings, then `goto_parent()` so the shared
+    /// cursor returns to the parent. (The previous implementation omitted
+    /// `goto_parent()`, which left the cursor stranded at a leaf and never
+    /// visited sibling subtrees — so only whole-file blocks were ever found.)
     fn collect_blocks_recursive(
         &self,
         cursor: &mut tree_sitter::TreeCursor,
@@ -197,9 +216,9 @@ impl Chunker {
         language: &str,
         blocks: &mut Vec<CodeBlock>,
     ) {
-        let node_types = match language {
+        let node_types: &[&str] = match language {
             "rust" => &["function_item", "struct_item", "enum_item",
-                         "trait_item", "impl_item", "type_item", "macro_definition"][..],
+                         "trait_item", "impl_item", "type_item", "macro_definition"],
             "python" => &["function_definition", "class_definition", "async_function_definition"],
             "javascript" | "typescript" => &["function_declaration", "class_declaration",
                                                "method_definition", "arrow_function", "export_statement"],
@@ -210,25 +229,30 @@ impl Chunker {
             _ => &[],
         };
 
-        // Walk the tree pre-order
-        let mut children = cursor.goto_first_child();
-        while children {
+        // Descend into the first child; bail if none (leaf node).
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
             let node = cursor.node();
             let kind = node.kind();
-
-            if node_types.contains(&kind) {
+            if node_types.iter().any(|t| *t == kind) {
                 collect_single_block(
                     node, source, abs_path, path, language, blocks,
                 );
             }
 
-            // Recurse into children
+            // Recurse into this node's children before the next sibling.
             self.collect_blocks_recursive(
                 cursor, source, abs_path, path, language, blocks,
             );
 
-            children = cursor.goto_next_sibling();
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
+        // Return the shared cursor to the parent so callers can continue.
+        cursor.goto_parent();
     }
 }
 
@@ -365,6 +389,10 @@ fn extract_imports(source: &str, language: &str, root_node: &tree_sitter::Node) 
         "javascript" | "typescript" => &["import_statement", "import_require_clause"],
         "go" => &["import_declaration"],
         "java" => &["import_declaration", "package_declaration"],
+        "php" => &["namespace_definition", "use_declaration"],
+        "ruby" => &["require", "include_statement"],
+        "swift" => &["import_declaration"],
+        "scala" => &["import", "package_declaration"],
         _ => return imports,
     };
 

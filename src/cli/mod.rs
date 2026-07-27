@@ -9,7 +9,7 @@
  * - Auto-index + stale rebuild: search/serve auto-index if missing or stale
  * - Smart context: --context N controls snippet size, highlight_lines pinpoints matches
  * - Zero-config: just run `sts-x search "query"` in any project directory
- * - Token-optimized defaults: top_k=3, context=5 for AI consumption
+ * - Token-optimized defaults: top_k=2, context=0 for AI consumption
  */
 
 use crate::types::{IndexConfig, SearchQuery, SearchMode, format::format_human_readable};
@@ -58,15 +58,62 @@ pub enum Commands {
         /// Search all files (code + non-code, filename + content)
         #[arg(long)]
         all: bool,
-        /// Number of results (default: 3)
-        #[arg(short, long, default_value = "3")]
+        /// Output mode: --expand (default) returns full AST blocks (read/modify);
+        /// --locate returns only matching lines + small context (grep-sized, ~130 tok).
+        #[arg(long)]
+        locate: bool,
+        /// Explicitly request --expand (full blocks). Default when neither flag is given.
+        #[arg(long)]
+        expand: bool,
+        /// Number of results (default: 2)
+        #[arg(short, long, default_value = "2")]
         top_k: usize,
-        /// Context lines around match (default: 5, 0 = full block)
-        #[arg(short = 'c', long, default_value = "5")]
+        /// Context lines around match for --expand (default: 0 = full block; >0 = window)
+        #[arg(short = 'c', long, default_value = "0")]
         context: usize,
         /// Human-readable output instead of default JSON
         #[arg(short = 'H', long)]
         human: bool,
+        /// Cap total output to roughly this many tokens (0 = unlimited).
+        /// Estimation: (char_count + 1) / 2. Results are truncated by dropping
+        /// lowest-score entries until the budget is met.
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
+    },
+    /// AI one-shot search (CLI path): auto-routes symbol→locate, NL→expand+budget.
+    /// Shares src/router.rs with the MCP `search` tool — identical behavior on both paths.
+    Ai {
+        /// Query: bare symbol (e.g. "run_search") or natural language description
+        query: String,
+        /// Project root path (default: auto-detected from current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        /// Override the auto token budget (0 = use router default)
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
+    },
+    /// File search: filename + content across ANY directory (no index needed).
+    /// Uses ripgrep if available, else a gitignore-aware walk. Zero-config.
+    File {
+        /// Search query (filename fragment or content term)
+        query: String,
+        /// Directory to search (default: current directory)
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
+        /// Match content (default) in addition to filename. Use --name-only to skip.
+        #[arg(long)]
+        name_only: bool,
+        /// Maximum results (default: 20)
+        #[arg(short, long, default_value = "20")]
+        top_k: usize,
+        /// Force using the built-in walker instead of ripgrep
+        #[arg(long)]
+        no_rg: bool,
+        /// Cap total output to roughly this many tokens (0 = unlimited).
+        /// Estimation: (char_count + 1) / 2. Results are truncated by dropping
+        /// lowest-score entries until the budget is met.
+        #[arg(long, default_value = "0")]
+        max_tokens: usize,
     },
     /// Start MCP HTTP server (auto-indexes, supports multi-project via "path" field)
     Serve {
@@ -100,9 +147,25 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             let p = resolve_path(path);
             cmd_index(&p, output, languages).await
         }
-        Commands::Search { query, path, index_path, filename, all, top_k, context, human } => {
+        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, max_tokens, .. } => {
             let p = resolve_path(path);
-            cmd_search(query, &p, index_path.as_ref(), *filename, *all, *top_k, *context, *human).await
+            let mode = if *locate {
+                crate::types::OutputMode::Locate
+            } else {
+                crate::types::OutputMode::Expand
+            };
+            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens).await
+        }
+        Commands::Ai { query, path, max_tokens } => {
+            let p = resolve_path(path);
+            run_ai(query, &p, *max_tokens).await
+        }
+        Commands::File { query, path, name_only, top_k, no_rg, max_tokens } => {
+            let p = match path {
+                Some(p) => normalize_path(p),
+                None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            };
+            cmd_file(&query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
         }
         Commands::Serve { path, index_path, host, port } => {
             let p = resolve_path(path);
@@ -113,6 +176,31 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             cmd_status(&p, index_path.as_ref()).await
         }
     }
+}
+
+/// R1: AI one-shot entry (CLI path). Classifies the query via the shared
+/// `router` module (same logic as the MCP `search` tool) and reuses the
+/// existing `cmd_search` pipeline — no duplicated search logic.
+async fn run_ai(query: &str, root: &Path, max_tokens_override: usize) -> anyhow::Result<()> {
+    let decision = crate::router::classify(query);
+    let max_tokens = if max_tokens_override > 0 {
+        max_tokens_override
+    } else {
+        decision.max_tokens
+    };
+    cmd_search(
+        query,
+        root,
+        None,               // index_path: default cache dir
+        false,              // filename mode
+        false,              // all mode
+        decision.output_mode,
+        decision.top_k,
+        0,                  // context_lines: full block for expand
+        false,              // human output: JSON for AI
+        max_tokens,
+    )
+    .await
 }
 
 /// Normalize POSIX-style paths for Windows (e.g. /c/Users → C:\Users)
@@ -219,9 +307,11 @@ async fn cmd_search(
     custom_index: Option<&PathBuf>,
     filename_mode: bool,
     all_mode: bool,
+    output_mode: crate::types::OutputMode,
     top_k: usize,
     context_lines: usize,
     human_output: bool,
+    max_tokens: usize,
 ) -> anyhow::Result<()> {
     let config = build_config(root, custom_index);
 
@@ -243,22 +333,74 @@ async fn cmd_search(
     let query = SearchQuery {
         query: query_str.to_string(),
         mode,
+        output_mode: Some(output_mode),
         top_k,
         context_lines,
+        max_tokens,
         ..Default::default()
     };
 
     let mut response = engine.search(query)?;
 
-    postprocess::post_process_results(&mut response, query_str, context_lines);
-
     if human_output {
+        // Human readable is always the full-block (expand) view.
+        postprocess::post_process_results(&mut response, query_str, context_lines);
         print!("{}", format_human_readable(&response));
+    } else if matches!(output_mode, crate::types::OutputMode::Locate) {
+        let ai_output: crate::types::format::AiLocateOutput = response.into();
+        println!("{}", serde_json::to_string_pretty(&ai_output)?);
     } else {
-        let ai_output: crate::types::format::AiSearchOutput = response.into();
+        postprocess::post_process_results(&mut response, query_str, context_lines);
+        let mut ai_output: crate::types::format::AiSearchOutput = response.into();
+        // R3: fold hot symbols (same shape on CLI and MCP paths).
+        postprocess::aggregate_results(&mut ai_output);
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
     }
 
+    Ok(())
+}
+
+/// `file` subcommand: filename + content search across ANY directory,
+/// with zero index required. Prefers ripgrep; falls back to a gitignore-aware
+/// walker. Mirrors the `sts` file-search UX for AI consumption.
+async fn cmd_file(
+    query_str: &str,
+    dir: &Path,
+    name_only: bool,
+    top_k: usize,
+    no_rg: bool,
+    max_tokens: usize,
+) -> anyhow::Result<()> {
+    let start = std::time::Instant::now();
+    let matches = crate::filesearch::search_files(query_str, dir, name_only, top_k, !no_rg)?;
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    // Apply max_tokens truncation: estimate token count from context fields
+    let out_matches: Vec<crate::types::FileMatch> = if max_tokens > 0 {
+        let mut total: usize = 0;
+        let mut truncated = Vec::new();
+        for m in matches {
+            let tok = (m.context.chars().count() + 1) / 2;
+            if total + tok > max_tokens && !truncated.is_empty() {
+                break;
+            }
+            total += tok;
+            truncated.push(m);
+        }
+        truncated
+    } else {
+        matches
+    };
+
+    let out = crate::types::format::AiFileOutput::from_matches(
+        query_str.to_string(),
+        out_matches,
+        elapsed,
+    );
+    // total_hits is the actual match count
+    let mut out = out;
+    out.total_hits = out.matches.len();
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 

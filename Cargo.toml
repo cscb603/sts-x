@@ -1,13 +1,13 @@
 [package]
 name = "sts-x"
-version = "0.2.1"
+version = "3.2.0"
 edition = "2021"
-description = "STS-X: 下一代 AI 代码搜索引擎 — AST 感知切块 + BM25 全文搜索 + MCP 服务，17MB 单二进制零依赖"
-authors = ["xtap"]
+description = "STS-X 3.2: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
+authors = ["星TAP实验室软件 <cscb603@qq.com>"]
 homepage = "https://github.com/cscb603/sts-x"
 repository = "https://github.com/cscb603/sts-x"
 license = "MIT"
-keywords = ["code-search", "ast", "bm25", "mcp", "ai-search-engine"]
+keywords = ["code-search", "ast", "bm25", "mcp", "ai-search-engine", "file-search"]
 categories = ["command-line-utilities", "development-tools", "search"]
 readme = "README.md"
 
@@ -20,11 +20,11 @@ semantic = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+core_lib = { path = "../rust_master_workspace/libs/core_lib", default-features = false, features = ["path", "mcp"] }
 thiserror = "2"
 
-# Async & HTTP
+# Async runtime (axum/HTTP framework now provided by core_lib::mcp, re-exported)
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -39,13 +39,21 @@ tree-sitter-java = "0.21"
 tree-sitter-c = "0.21"
 tree-sitter-cpp = "0.21"
 tree-sitter-go = "0.21"
+# New languages (v3.1)
+tree-sitter-php = "0.22"
+tree-sitter-ruby = "0.21"
+tree-sitter-scala = "0.21.0"
+devgen-tree-sitter-swift = "0.21.0"
 ignore = "0.4"
 
 # Path diff
 pathdiff = "0.2"
 
-# System directories
-dirs = "5"
+# Encoding fallback for CJK (GBK/GB18030/Big5) on Windows
+encoding_rs = "0.8"
+
+# System directories (aligned with core_lib base lib → dirs 6)
+dirs = "6"
 
 # Full-text search
 tantivy = "0.22"
@@ -68,7 +76,7 @@ name = "sts-x"
 path = "src/main.rs"
 
 [build-dependencies]
-embed-resource = "2"
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

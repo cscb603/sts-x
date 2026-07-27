@@ -18,3 +18,7 @@
 
 # Release packages
 sts-x-win*
+
+# python caches
+scripts/__pycache__/
+__pycache__/

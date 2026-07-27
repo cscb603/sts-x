@@ -11,21 +11,43 @@
  * - _ai_instructions field: always present, tells AI how to use results
  */
 
-use crate::types::{SearchResponse, SearchResult};
+use crate::types::{FileMatch, LocateMatch, SearchResponse, SearchResult};
 use serde::Serialize;
 
-const AI_HINT: &str = "I am STS-X, an AI-native code search engine. CLI: sts-x search \"q\" (code), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results count), --path /dir (project root). MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"top_k\":3,\"context_lines\":5} to /search. Response: abs_path+lines=read location, highlight_lines=exact matches, score=relevance, code=truncated snippet.";
+pub const AI_HINT: &str = concat!(
+    "I am STS-X ",
+    env!("CARGO_PKG_VERSION"),
+    ", an AI-native unified code+file search engine. CLI: sts-x search \"q\" (code, --expand full block default | --locate line-level grep-sized), sts-x file \"q\" [--path DIR] (filename+content, zero-index via rg), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results), --path DIR. MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"output_mode\":\"expand|locate\",\"top_k\":3} to /search; POST {\"query\":\"...\",\"path\":\"/abs/dir\",\"content\":true,\"top_k\":10} to /file. Response: abs_path+lines=read location, score=relevance. locate: each match is a line (grep-sized, ~130 tok) — need the full block? re-run with output_mode=expand on that symbol. expand: code=full block."
+);
 
 #[derive(Debug, Serialize)]
 pub struct AiSearchOutput {
     pub query: String,
+    /// R1 (v0.4): discriminator field ("expand") so AI can deterministically
+    /// parse CLI and MCP responses the same way (locate output carries "locate").
+    pub mode: &'static str,
     pub results: Vec<AiResultItem>,
     pub total_hits: usize,
     pub search_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_hop: Option<Vec<AiMultiHopStep>>,
+    /// R3 (v0.4): hot-symbol aggregation. When one symbol name matches blocks
+    /// in many files, the flat listing is folded into per-symbol groups
+    /// (`file_count` + top-3 by score) — same shape on CLI and MCP paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregated: Option<Vec<AiAggregateGroup>>,
     #[serde(rename = "_ai_instructions")]
     pub _ai_instructions: &'static str,
+}
+
+/// R3: one aggregated group — a symbol that matched across multiple blocks/files.
+#[derive(Debug, Serialize)]
+pub struct AiAggregateGroup {
+    pub symbol: String,
+    pub file_count: usize,
+    /// Total matched blocks folded into this group (before top-3 cut).
+    pub match_count: usize,
+    pub top: Vec<AiResultItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +76,7 @@ impl From<SearchResponse> for AiSearchOutput {
     fn from(resp: SearchResponse) -> Self {
         AiSearchOutput {
             query: resp.query,
+            mode: "expand",
             results: resp.results.into_iter().map(Into::into).collect(),
             total_hits: resp.total_hits,
             search_time_ms: resp.search_time_ms,
@@ -67,6 +90,7 @@ impl From<SearchResponse> for AiSearchOutput {
                     })
                     .collect()
             }),
+            aggregated: None, // filled by postprocess::aggregate_results (R3)
             _ai_instructions: AI_HINT,
         }
     }
@@ -87,6 +111,95 @@ impl From<SearchResult> for AiResultItem {
             summary: b.doc_comment,
             code: b.code,
             language: b.language,
+        }
+    }
+}
+
+// ─── 3.0 locate-mode output (grep-sized line hits) ───────────────
+// Deliberately minimal (file/line/context/score) — no abs_path, no
+// _ai_instructions — so a locate call stays ~130 tok, far below the
+// grep+Read flow. The AI expands a symbol via --expand when it needs more.
+#[derive(Debug, Serialize)]
+pub struct AiLocateOutput {
+    pub query: String,
+    pub mode: &'static str,
+    pub matches: Vec<AiLocateItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiLocateItem {
+    pub file: String,
+    pub line: usize,
+    pub context: String,
+    pub score: f32,
+}
+
+impl From<SearchResponse> for AiLocateOutput {
+    fn from(resp: SearchResponse) -> Self {
+        AiLocateOutput {
+            query: resp.query,
+            mode: "locate",
+            matches: resp.locate_matches.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<LocateMatch> for AiLocateItem {
+    fn from(m: LocateMatch) -> Self {
+        AiLocateItem {
+            file: m.file,
+            line: m.line,
+            context: m.context,
+            score: m.score,
+        }
+    }
+}
+
+// ─── 3.0 file-mode output (filename + content, zero-index) ─────────
+#[derive(Debug, Serialize)]
+pub struct AiFileOutput {
+    pub query: String,
+    pub mode: &'static str,
+    pub matches: Vec<AiFileItem>,
+    pub total_hits: usize,
+    pub search_time_ms: u64,
+    #[serde(rename = "_ai_instructions")]
+    pub _ai_instructions: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiFileItem {
+    pub path: String,
+    pub abs_path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub is_dir: bool,
+    pub matched_by: String,
+    pub line: usize,
+    pub context: String,
+}
+
+impl AiFileOutput {
+    pub fn from_matches(query: String, matches: Vec<FileMatch>, search_time_ms: u64) -> Self {
+        AiFileOutput {
+            query,
+            mode: "file",
+            matches: matches
+                .into_iter()
+                .map(|m| AiFileItem {
+                    path: m.path,
+                    abs_path: m.abs_path,
+                    size: m.size,
+                    mtime: m.mtime,
+                    is_dir: m.is_dir,
+                    matched_by: m.matched_by,
+                    line: m.line,
+                    context: m.context,
+                })
+                .collect(),
+            total_hits: 0, // filled by caller (matches are built already)
+            search_time_ms,
+            _ai_instructions: AI_HINT,
         }
     }
 }

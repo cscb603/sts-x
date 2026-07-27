@@ -34,7 +34,7 @@ pub enum BlockKind {
     Type,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     #[default]
@@ -43,11 +43,57 @@ pub enum SearchMode {
     All,
 }
 
+/// Output verbosity mode (STS-X 3.0 progressive disclosure).
+/// - `Expand` (default): return the full AST block (function/class/method) so the
+///   AI can read/modify it. Token-heavy but complete.
+/// - `Locate`: return only the matching line(s) + small context, grep-sized (~130 tok).
+///   Used for "first locate", then optionally `--expand` a specific symbol.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    #[default]
+    Expand,
+    Locate,
+}
+
+/// A single located match line (used by `--locate` output mode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocateMatch {
+    pub score: f32,
+    pub file: String,
+    pub abs_path: String,
+    pub line: usize,
+    pub context: String,
+    pub kind: String,
+    pub name: String,
+}
+
+/// A file-system match (used by the `file` subcommand).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMatch {
+    pub path: String,
+    pub abs_path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub is_dir: bool,
+    /// "name" | "content" — how this entry matched.
+    pub matched_by: String,
+    /// line number when matched by content (0 for name-only)
+    pub line: usize,
+    /// the matching line content (empty for name-only)
+    pub context: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub query: String,
     #[serde(default)]
     pub mode: SearchMode,
+    /// 3.0: progressive-disclosure output. Expand=full block, Locate=line-level.
+    /// R1 (v0.4): `None` = caller did not specify → entry points (CLI `ai` /
+    /// MCP `search`) auto-route via `router::classify`. `Some(_)` = explicit.
+    #[serde(default)]
+    pub output_mode: Option<OutputMode>,
     #[serde(default)]
     pub languages: Option<Vec<String>>,
     #[serde(default)]
@@ -64,24 +110,33 @@ pub struct SearchQuery {
     pub filename: bool,
     #[serde(default)]
     pub all: bool,
+    /// Max tokens for the combined result output. 0 = unlimited.
+    /// Estimation: (char_count + 1) / 2. Results are truncated (drop lowest-score)
+    /// until the token budget is met. Affects expand mode only (locate is already
+    /// budget-capped at the line level).
+    #[serde(default)]
+    pub max_tokens: usize,
 }
 
-fn default_top_k() -> usize { 3 }
-fn default_context() -> usize { 5 }
+fn default_top_k() -> usize { 2 }
+fn default_context() -> usize { 0 }
 
 impl Default for SearchQuery {
     fn default() -> Self {
         Self {
             query: String::new(),
             mode: SearchMode::default(),
+            output_mode: None,
             languages: None,
             path_filter: None,
-            top_k: 3,
-            context_lines: 5,
+            top_k: 2,
+            // 0 = full block (expand default is complete AST block, not a window)
+            context_lines: 0,
             multi_hop: false,
             path: None,
             filename: false,
             all: false,
+            max_tokens: 0,
         }
     }
 }
@@ -102,6 +157,9 @@ pub struct SearchResponse {
     pub search_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_hop: Option<Vec<MultiHopStep>>,
+    /// 3.0 locate-mode matches (grep-sized line hits). Empty unless output_mode==Locate.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub locate_matches: Vec<LocateMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +192,10 @@ impl Default for IndexConfig {
                 "typescript".into(),
                 "go".into(),
                 "java".into(),
+                "php".into(),
+                "ruby".into(),
+                "swift".into(),
+                "scala".into(),
             ],
             exclude_patterns: vec![
                 "node_modules/*".into(),
