@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""sts-x stdio bridge — 转 MCP JSON-RPC (stdin/stdout) → sts-x HTTP REST (127.0.0.1:8765)
+
+跨平台：macOS / Windows / Linux（仅需 Python 3.8+，纯标准库，零依赖）。
+
+用法（WorkBuddy / Claude Desktop 等 MCP 客户端 mcp.json）：
+  {
+    "mcpServers": {
+      "sts-x": {
+        "command": "/绝对路径/sts-x-mcp-bridge",
+        "args": [],
+        "env": {"STX_BIN": "/绝对路径/sts-x.exe"},   // 可选：显式指定二进制
+        "disabled": false
+      }
+    }
+  }
+
+环境变量：
+  STX_BIN        sts-x 二进制路径（默认 "sts-x"，走 PATH）
+  STX_PORT       HTTP 服务端口（默认 8765）
+  STX_ROOT       默认项目根（可选；客户端 search 带 path 时优先用 path）
+"""
+import json
+import sys
+import urllib.request
+import urllib.error
+import subprocess
+import time
+import os
+
+BASE_HOST = "127.0.0.1"
+PORT = int(os.environ.get("STX_PORT", "8765"))
+BASE = f"http://{BASE_HOST}:{PORT}"
+BIN = os.environ.get("STX_BIN", "sts-x")
+ROOT = os.environ.get("STX_ROOT", "")
+SERVE_CMD = [BIN, "serve", "--port", str(PORT)]
+if ROOT:
+    SERVE_CMD += ["-p", ROOT]
+
+
+def ensure_serve():
+    """确保 sts-x serve 在跑；不在则拉起（幂等，可跨进程共享）。"""
+    try:
+        urllib.request.urlopen(f"{BASE}/health", timeout=1).read()
+        return  # 已在跑
+    except Exception:
+        pass
+
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(
+        SERVE_CMD,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **kwargs,
+    )
+    # 等就绪（最多 5s）
+    for _ in range(50):
+        try:
+            urllib.request.urlopen(f"{BASE}/health", timeout=1).read()
+            return
+        except Exception:
+            time.sleep(0.1)
+    sys.stderr.write("sts-x-mcp-bridge: failed to start sts-x serve\n")
+    sys.exit(1)
+
+
+def http_get(path):
+    req = urllib.request.Request(f"{BASE}{path}", method="GET")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def http_post(path, body):
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{BASE}{path}",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def handle(req):
+    """把一个 JSON-RPC 请求翻译成 MCP 响应。"""
+    method = req.get("method")
+    rpc_id = req.get("id")
+    params = req.get("params", {})
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "sts-x", "version": "3.2.0"},
+            },
+        }
+
+    if method == "notifications/initialized":
+        return None  # 通知无需回包
+
+    if method == "tools/list":
+        # sts-x /tools 返回 input_schema（蛇形），MCP 协议要求 inputSchema（驼峰）
+        tools = http_get("/tools").get("tools", [])
+        mcp_tools = []
+        for t in tools:
+            mcp_tools.append({
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "inputSchema": t.get("input_schema") or t.get("inputSchema") or {"type": "object"},
+            })
+        return {"jsonrpc": "2.0", "id": rpc_id, "result": {"tools": mcp_tools}}
+
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments", {})
+        if name == "search":
+            data = http_post("/search", args)
+        elif name == "file":
+            data = http_post("/file", args)
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "error": {"code": -32601, "message": f"unknown tool: {name}"},
+            }
+        text = json.dumps(data, ensure_ascii=False)
+        return {
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": False,
+            },
+        }
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": rpc_id, "result": {}}
+
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "error": {"code": -32601, "message": f"method not implemented: {method}"},
+    }
+
+
+def main():
+    ensure_serve()
+    try:
+        sys.stdin.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass  # 某些 Python 构建无 reconfigure，忽略
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            sys.stdout.write(json.dumps({
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32700, "message": f"parse error: {e}"},
+            }) + "\n")
+            sys.stdout.flush()
+            continue
+        try:
+            resp = handle(req)
+        except urllib.error.HTTPError as e:
+            resp = {
+                "jsonrpc": "2.0", "id": req.get("id"),
+                "error": {"code": -32000, "message": f"HTTP {e.code}: {e.reason}"},
+            }
+        except Exception as e:
+            resp = {
+                "jsonrpc": "2.0", "id": req.get("id"),
+                "error": {"code": -32603, "message": f"internal error: {e}"},
+            }
+        if resp is None:
+            continue
+        sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
