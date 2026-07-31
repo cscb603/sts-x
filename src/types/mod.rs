@@ -165,6 +165,10 @@ pub struct SearchResponse {
     /// 3.0 locate-mode matches (grep-sized line hits). Empty unless output_mode==Locate.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub locate_matches: Vec<LocateMatch>,
+    /// v5.1 (P0-2): zero-hit rescue hint (locate). Some ONLY when the locate
+    /// search returned no matches; serde-skips when None (protocol compatible).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

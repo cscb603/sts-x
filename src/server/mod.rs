@@ -229,7 +229,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: Some("error: failed to initialize search engine"),
+                _ai_instructions: Some("error: failed to initialize search engine".to_string()),
             }));
         }
     };
@@ -246,7 +246,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: Some("error: engine not found"),
+                _ai_instructions: Some("error: engine not found".to_string()),
             }));
         }
     };
@@ -301,7 +301,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: Some("error: search failed"),
+                _ai_instructions: Some("error: search failed".to_string()),
             }))
         }
     }
@@ -333,7 +333,7 @@ async fn handle_file(
                 matches: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
-                _ai_instructions: Some("error: file search failed"),
+                _ai_instructions: Some("error: file search failed".to_string()),
             });
         }
     };

@@ -160,6 +160,12 @@ impl SearchEngine {
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
+        // v5.1 (P0-2): zero-hit locate → rescue hint so the AI can self-recover.
+        let hint = if matches.is_empty() {
+            Some(crate::types::format::build_hint(&query.query, 0, "locate"))
+        } else {
+            None
+        };
         Ok(SearchResponse {
             query: query.query.clone(),
             total_hits: matches.len(),
@@ -167,6 +173,7 @@ impl SearchEngine {
             search_time_ms: elapsed,
             multi_hop: None,
             locate_matches: matches,
+            hint,
         })
     }
 
@@ -206,6 +213,7 @@ impl SearchEngine {
                     search_time_ms: elapsed,
                     multi_hop: None,
                     locate_matches: Vec::new(),
+                    hint: None,
                 });
             }
         }
@@ -244,6 +252,7 @@ impl SearchEngine {
             search_time_ms: elapsed,
             multi_hop: None,
             locate_matches: Vec::new(),
+            hint: None,
         })
     }
 
@@ -262,6 +271,7 @@ impl SearchEngine {
             search_time_ms: elapsed,
             multi_hop: None,
             locate_matches: Vec::new(),
+            hint: None,
         })
     }
 
@@ -323,6 +333,7 @@ impl SearchEngine {
             search_time_ms: elapsed,
             multi_hop: None,
             locate_matches,
+            hint: None,
         })
     }
 }

@@ -20,6 +20,39 @@ pub const AI_HINT: &str = concat!(
     ", an AI-native unified code+file search engine. CLI: sts-x search \"q\" (code, --expand full block default | --locate line-level grep-sized), sts-x file \"q\" [--path DIR] (filename+content, zero-index via rg), sts-x search \"q\" -f (filename), sts-x search \"q\" --all (all files). Options: -c N (context lines, 0=full), -t N (results), --path DIR. MCP: POST {\"query\":\"...\",\"mode\":\"code|filename|all\",\"output_mode\":\"expand|locate\",\"top_k\":3} to /search; POST {\"query\":\"...\",\"path\":\"/abs/dir\",\"content\":true,\"top_k\":10} to /file. Response: abs_path+lines=read location, score=relevance. locate: each match is a line (grep-sized, ~130 tok) — need the full block? re-run with output_mode=expand on that symbol. expand: code=full block."
 );
 
+/// True for CJK ideographs / kana / hangul. Mirrors `indexer::is_cjk` (kept
+/// local so format.rs has zero coupling to the indexer module).
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3400}'..='\u{4dbf}' | // CJK Ext A
+        '\u{4e00}'..='\u{9fff}' | // CJK Unified
+        '\u{3040}'..='\u{30ff}' | // Hiragana / Katakana
+        '\u{ac00}'..='\u{d7af}'   // Hangul
+    )
+}
+
+/// v5.1 (P0-1): dynamic AI guidance — the zero-hit self-rescue contract.
+/// `hits == 0` → language-matched rescue suggestions (Chinese query → Chinese
+/// advice, ASCII → English) so the AI can recover without a dead end; `hits > 0`
+/// → the normal usage guide (`AI_HINT`). `mode` ("expand" | "locate" | "file")
+/// is reserved for future per-mode guidance.
+pub fn build_hint(query: &str, hits: usize, _mode: &str) -> String {
+    if hits > 0 {
+        return AI_HINT.to_string();
+    }
+    if query.chars().any(is_cjk) {
+        format!(
+            "未找到直接匹配「{}」。建议：① 换英文关键词（如 cache 对应缓存）；② 用符号/函数名（如 cache_root）；③ 用 --path-filter 限定文件；④ 用 sts-x file 搜文件名",
+            query
+        )
+    } else {
+        format!(
+            "No direct match for \"{}\". Try: ① a symbol name (e.g. cache_root); ② a file name; ③ broader terms; ④ --path-filter",
+            query
+        )
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AiSearchOutput {
     pub query: String,
@@ -37,7 +70,7 @@ pub struct AiSearchOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregated: Option<Vec<AiAggregateGroup>>,
     #[serde(rename = "_ai_instructions", skip_serializing_if = "Option::is_none")]
-    pub _ai_instructions: Option<&'static str>,
+    pub _ai_instructions: Option<String>,
 }
 
 /// R3: one aggregated group — a symbol that matched across multiple blocks/files.
@@ -74,6 +107,8 @@ pub struct AiMultiHopStep {
 
 impl From<SearchResponse> for AiSearchOutput {
     fn from(resp: SearchResponse) -> Self {
+        // v5.1 (P0-1): compute dynamic guidance before moving fields out.
+        let hint = build_hint(&resp.query, resp.total_hits, "expand");
         AiSearchOutput {
             query: resp.query,
             mode: "expand",
@@ -91,7 +126,7 @@ impl From<SearchResponse> for AiSearchOutput {
                     .collect()
             }),
             aggregated: None, // filled by postprocess::aggregate_results (R3)
-            _ai_instructions: Some(AI_HINT),
+            _ai_instructions: Some(hint),
         }
     }
 }
@@ -124,6 +159,10 @@ pub struct AiLocateOutput {
     pub query: String,
     pub mode: &'static str,
     pub matches: Vec<AiLocateItem>,
+    /// v5.1 (P0-2): zero-hit rescue hint — serialized ONLY when matches is
+    /// empty, so a normal locate call stays ~130 tok (grep-sized).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,6 +183,7 @@ impl From<SearchResponse> for AiLocateOutput {
             query: resp.query,
             mode: "locate",
             matches: resp.locate_matches.into_iter().map(Into::into).collect(),
+            hint: resp.hint,
         }
     }
 }
@@ -170,7 +210,7 @@ pub struct AiFileOutput {
     pub total_hits: usize,
     pub search_time_ms: u64,
     #[serde(rename = "_ai_instructions", skip_serializing_if = "Option::is_none")]
-    pub _ai_instructions: Option<&'static str>,
+    pub _ai_instructions: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +227,8 @@ pub struct AiFileItem {
 
 impl AiFileOutput {
     pub fn from_matches(query: String, matches: Vec<FileMatch>, search_time_ms: u64) -> Self {
+        // v5.1 (P0-1): dynamic guidance for the file path too.
+        let hint = build_hint(&query, matches.len(), "file");
         AiFileOutput {
             query,
             mode: "file",
@@ -205,7 +247,7 @@ impl AiFileOutput {
                 .collect(),
             total_hits: 0, // filled by caller (matches are built already)
             search_time_ms,
-            _ai_instructions: Some(AI_HINT),
+            _ai_instructions: Some(hint),
         }
     }
 }
@@ -295,5 +337,65 @@ mod tests {
         assert_eq!(json["abs_path"], "/abs/libs/core_lib/src/mcp/mod.rs");
         assert!(json.get("abs_path").is_some());
         assert!(json.get("name").is_some());
+    }
+
+    // ── v5.1 (P0-1 / P0-2): zero-hit self-rescue guidance ──────────────
+
+    #[test]
+    fn build_hint_zero_hits_cjk_returns_chinese() {
+        let hint = build_hint("索引过期", 0, "expand");
+        // Whitepaper §3 P0: Chinese query → Chinese rescue advice.
+        assert!(hint.contains("未找到直接匹配「索引过期」"), "got: {hint}");
+        assert!(hint.contains("换英文关键词"), "got: {hint}");
+        assert!(hint.contains("符号/函数名"), "got: {hint}");
+    }
+
+    #[test]
+    fn build_hint_zero_hits_ascii_returns_english() {
+        let hint = build_hint("cache_root_xyz", 0, "expand");
+        assert!(hint.contains("No direct match"), "got: {hint}");
+        assert!(hint.contains("symbol name"), "got: {hint}");
+    }
+
+    #[test]
+    fn build_hint_with_hits_returns_usage_guide() {
+        // hits > 0 → the normal usage guide (not the rescue template).
+        assert_eq!(build_hint("缓存", 3, "expand"), AI_HINT);
+        assert_eq!(build_hint("cache_root", 1, "locate"), AI_HINT);
+    }
+
+    #[test]
+    fn locate_hint_none_is_omitted_from_json() {
+        let resp = SearchResponse {
+            query: "McpServer".to_string(),
+            results: Vec::new(),
+            total_hits: 0,
+            search_time_ms: 1,
+            multi_hop: None,
+            locate_matches: Vec::new(),
+            hint: None,
+        };
+        let out: AiLocateOutput = resp.into();
+        let json = serde_json::to_value(&out).unwrap();
+        // Protocol compat (whitepaper §5): optional field must be absent.
+        assert!(json.get("hint").is_none());
+    }
+
+    #[test]
+    fn locate_hint_some_is_serialized_and_passthrough() {
+        let resp = SearchResponse {
+            query: "索引过期".to_string(),
+            results: Vec::new(),
+            total_hits: 0,
+            search_time_ms: 1,
+            multi_hop: None,
+            locate_matches: Vec::new(),
+            hint: Some(build_hint("索引过期", 0, "locate")),
+        };
+        let out: AiLocateOutput = resp.into();
+        let json = serde_json::to_value(&out).unwrap();
+        let h = json.get("hint").expect("hint must be serialized");
+        assert!(h.as_str().unwrap().contains("换英文关键词"));
+        assert_eq!(json["mode"], "locate");
     }
 }
