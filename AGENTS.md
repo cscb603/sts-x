@@ -25,33 +25,46 @@ sts-x ai "缓存" -p <项目>   # 中文查询应命中 cache.rs 类文件
 sts-x.exe ai "缓存" -p <项目>
 ```
 
-MCP 服务（AI 客户端接入）——两种方式：
+MCP 服务（AI 客户端接入）——三种方式：
 
-**方式 A（推荐，stdio bridge，跨平台）**：WorkBuddy/Claude Desktop 等客户端配 `command` 型 MCP：
+**方式 A（推荐，原生 stdio MCP，零依赖）**：单二进制直接说 MCP 协议，无 Python、无端口、无额外进程：
 
+```json
+{
+  "mcpServers": {
+    "sts-x": {
+      "command": "/usr/local/bin/sts-x",   // Win: C:\\tools\\sts-x.exe
+      "args": ["mcp", "-p", "/Users/xtap/Documents/AI"],  // -p 默认项目根
+      "env": {},
+      "disabled": false
+    }
+  }
+}
+```
+客户端看到的工具：`search` / `file`。每次调用可用 `path` 参数覆盖项目根。
+
+**方式 B（Python bridge，旧版/无原生 mcp 的二进制才用）**：
 ```json
 {
   "mcpServers": {
     "sts-x": {
       "command": "<绝对路径>/scripts/sts-x-mcp-bridge",
       "args": [],
-      "env": { "STX_ROOT": "<默认项目根，可省略>" },
+      "env": { "STX_ROOT": "<默认项目根>" },
       "disabled": false
     }
   }
 }
 ```
-bridge 自动拉起 `sts-x serve`（127.0.0.1:8765）并做 JSON-RPC 转发，客户端看到的工具：`search` / `file`。
 环境变量：`STX_BIN`（二进制路径）、`STX_PORT`（默认 8765）、`STX_ROOT`（默认项目根）。
-⚠️ 若客户端 tools/list 报 `invalid_type`，检查 bridge 是否旧版（必须 ≥ 2026-07-31 版，`inputSchema` 驼峰）。
+⚠️ 需要 Python 3（Win 默认没有）；tools/list 报 `invalid_type` = bridge 旧版（须 ≥ 2026-07-31，`inputSchema` 驼峰）。
 
-**方式 B（HTTP 直连）**：客户端支持 streamable-http 时：
+**方式 C（HTTP 直连）**：客户端支持 streamable-http 时：
 ```bash
 sts-x serve -p <项目根> --port 9876
-# url: http://127.0.0.1:9876
-# 端点：/health /tools /search /file
+# url: http://127.0.0.1:9876；端点：/health /tools /search /file
 ```
-⚠️ 注意：sts-x 的 HTTP 端点是自定义 REST（非标准 MCP streamable HTTP），客户端若严格校验 MCP 协议会失败——**建议用方式 A**。
+⚠️ sts-x HTTP 端点是自定义 REST（非标准 MCP streamable HTTP），严格校验的客户端会失败——**推荐方式 A**。
 
 ## 三、CLI 接口
 

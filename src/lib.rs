@@ -7,6 +7,7 @@ pub mod cli;
 pub mod embed;
 pub mod filesearch;
 pub mod indexer;
+pub mod mcp;
 pub mod postprocess;
 pub mod router;
 pub mod search;

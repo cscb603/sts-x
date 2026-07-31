@@ -140,6 +140,14 @@ pub enum Commands {
         #[arg(short = 'P', long, default_value = "9876")]
         port: u16,
     },
+    /// Native stdio MCP server (JSON-RPC over stdin/stdout). No HTTP, no port,
+    /// no Python bridge — the single binary speaks MCP directly. Recommended
+    /// for WorkBuddy / Claude Desktop / any stdio-capable MCP client.
+    Mcp {
+        /// Default project root (clients can override per-call via "path")
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
     /// Show index status and cache location
     Status {
         /// Project root path (default: auto-detected from current directory)
@@ -180,6 +188,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         Commands::Serve { path, index_path, host, port } => {
             let p = resolve_path(path);
             cmd_serve(&p, index_path.as_ref(), host, *port).await
+        }
+        Commands::Mcp { path } => {
+            let p = resolve_path(path);
+            crate::mcp::run(&p)
         }
         Commands::Status { path, index_path } => {
             let p = resolve_path(path);
