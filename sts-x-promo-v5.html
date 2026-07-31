@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>STS-X · 给 AI 的代码搜索引擎</title>
+<style>
+  :root{
+    --bg:#FAFAF8;
+    --ink:#26292E;
+    --ink-soft:#646B73;
+    --line:#E4E4DE;
+    --accent:#3E6D99;      /* 雾蓝 */
+    --accent-soft:#EAF1F7;
+    --green:#2F7D5C;       /* 雾绿 */
+    --green-soft:#EAF4EF;
+    --card:#FFFFFF;
+    --radius:20px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{
+    min-height:100vh;min-height:100dvh;
+    scroll-snap-align:start;
+    display:flex;flex-direction:column;justify-content:center;
+    padding:60px 32px 52px;position:relative;
+    border-bottom:1px solid var(--line);
+  }
+  .page .num{
+    position:absolute;top:30px;left:32px;
+    font-size:13px;letter-spacing:.16em;color:var(--ink-soft);font-weight:500;
+  }
+  .kicker{
+    font-size:14px;letter-spacing:.12em;color:var(--accent);
+    text-transform:uppercase;font-weight:700;margin-bottom:20px;
+  }
+  h1{font-size:50px;line-height:1.16;font-weight:800;letter-spacing:-.015em}
+  h2{font-size:36px;line-height:1.22;font-weight:800;letter-spacing:-.01em;margin-bottom:16px}
+  .lead{font-size:18px;line-height:1.8;color:var(--ink-soft);margin-top:18px;font-weight:400}
+  .small{font-size:14px;line-height:1.75;color:var(--ink-soft)}
+  .center{text-align:center}
+  .accent{color:var(--accent)}
+  .green{color:var(--green)}
+  .cover h1 .line2{display:block;margin-top:8px}
+  .cover .badge{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:13px;color:var(--green);background:var(--green-soft);
+    padding:9px 16px;border-radius:999px;margin-bottom:26px;font-weight:600;
+  }
+  .cover .arrow{font-size:24px;margin-top:60px;color:var(--accent);font-weight:600}
+  /* 封面：图为主视觉 */
+  .hero{
+    width:100%;max-width:100%;
+    aspect-ratio:16/9;          /* 桌面用横版 */
+    background:url('assets/sts-x3.20封面横版.png') center/cover no-repeat;
+    border-radius:16px;
+    margin-bottom:32px;
+  }
+  .cover-text{font-size:18px;line-height:1.7;color:var(--ink-soft);font-weight:400}
+  .cover-text b{color:var(--ink)}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:26px;margin-top:22px;
+  }
+  .card h3{font-size:19px;font-weight:700;margin-bottom:10px}
+  .card p{font-size:16px;line-height:1.8;color:var(--ink-soft)}
+  .bars{margin-top:34px;display:flex;flex-direction:column;gap:24px}
+  .bar-label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px}
+  .bar-name{font-size:16px;font-weight:600}
+  .bar-val{font-size:15px;color:var(--ink-soft)}
+  .bar-track{height:20px;background:#F0F0EB;border-radius:10px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:10px;display:flex;align-items:center;justify-content:flex-end;padding-right:12px;font-size:12px;font-weight:700;color:#fff;transition:width 1s ease}
+  .fill-grep{width:100%;background:#C9CDD3}
+  .fill-expand{width:30%;background:var(--accent)}
+  .fill-locate{width:8.5%;background:var(--green)}
+  .bar-note{margin-top:16px;font-size:15px;color:var(--ink-soft);line-height:1.8}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:28px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px 18px}
+  .stat .v{font-size:30px;font-weight:800;color:var(--accent)}
+  .stat .k{font-size:13px;color:var(--ink-soft);margin-top:5px;line-height:1.55}
+  .feat{display:flex;gap:16px;align-items:flex-start;padding:20px 0;border-bottom:1px solid var(--line)}
+  .feat:last-child{border-bottom:none}
+  .feat .ico{width:42px;height:42px;flex-shrink:0;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:19px;background:var(--accent-soft)}
+  .feat .t{font-size:17px;font-weight:700;margin-bottom:4px}
+  .feat .d{font-size:15px;line-height:1.7;color:var(--ink-soft)}
+  .steps{counter-reset:step;margin-top:28px}
+  .step{display:flex;gap:18px;padding:22px 0;border-bottom:1px solid var(--line)}
+  .step:last-child{border-bottom:none}
+  .step .n{
+    counter-increment:step;flex-shrink:0;width:38px;height:38px;border-radius:50%;
+    background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;
+    font-size:16px;font-weight:700;
+  }
+  .step .t{font-size:17px;font-weight:700;margin-bottom:5px}
+  .step .d{font-size:15px;line-height:1.7;color:var(--ink-soft)}
+  .cta .big{font-size:27px;font-weight:800;line-height:1.45;margin-top:20px}
+  .who{display:grid;gap:11px;margin-top:32px}
+  .who div{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px 20px;font-size:16px;line-height:1.7}
+  .footer{margin-top:44px;text-align:center;font-size:12.5px;color:var(--ink-soft)}
+  @media(min-width:600px){
+    .page{max-width:540px;margin:0 auto;border-left:1px solid var(--line);border-right:1px solid var(--line)}
+  }
+  /* 移动端用竖版图（更适配手机 3:4 比例） */
+  @media(max-width:599px){
+    .hero{
+      aspect-ratio:3/4;
+      background-image:url('assets/sts-x3.20封面竖版3比4.png');
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- ① 封面：图片为主视觉 -->
+<section class="page cover">
+  <div class="kicker">STS-X · 给 AI 的代码搜索引擎</div>
+  <div class="hero"></div>
+  <p class="cover-text">每次 AI 反复找代码、读整文件，<br>
+    都在<b>烧钱 + 浪费时间</b>。<br>
+    STS-X 让 AI 找代码快 <b style="color:var(--green)">10 倍</b>，省到底。</p>
+  <div class="arrow center">↓ 往下翻，2 分钟看懂</div>
+</section>
+
+<!-- ② 痛点：AI 在"找"上烧钱 -->
+<section class="page">
+  <div class="num">01 · 先看问题</div>
+  <h2>AI 很聪明，<br>但一半时间在"找东西"。</h2>
+  <p class="lead">让它写一个新功能，它得先搞清楚：</p>
+  <div class="card">
+    <p>"这个缓存函数在哪？<br>
+    配置写哪个文件？<br>
+    上次那个接口叫什么来着？"<br><br>
+    于是它一遍遍搜索、一次次读整个文件。<br>
+    <b style="color:var(--ink)">每多找一次，就多花一次钱、多等一会儿。</b></p>
+  </div>
+  <p class="lead" style="font-size:16px">项目越大，代码越多，这个浪费越吓人。</p>
+</section>
+
+<!-- ③ 它是什么 -->
+<section class="page">
+  <div class="num">02 · 它是什么</div>
+  <h2>给 AI 装的<br>「代码搜索加速器」。</h2>
+  <p class="lead">STS-X 是一个极轻量的本地小工具：</p>
+  <div class="card">
+    <h3>27 MB 单文件，装了就能用</h3>
+    <p>不需要服务器、不需要联网、不需要装环境。<br><br>
+    它先把你的项目"读懂"（自动分块索引），<br>
+    之后 AI 搜什么，它都<b style="color:var(--ink)">秒回坐标</b>：<br>
+    在哪个文件、第几行、代码长什么样。</p>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="v">0.5s</div><div class="k">建好整个项目的索引</div></div>
+    <div class="stat"><div class="v">30ms</div><div class="k">搜一次平均耗时</div></div>
+    <div class="stat"><div class="v">27MB</div><div class="k">单文件零依赖</div></div>
+    <div class="stat"><div class="v">中文✓</div><div class="k">说人话就能搜</div></div>
+  </div>
+</section>
+
+<!-- ④ 省钱铁证 -->
+<section class="page">
+  <div class="num">03 · 省钱的铁证</div>
+  <h2>同样找一次代码，<br>费用差 10 倍。</h2>
+  <p class="lead">真实实测（找「缓存」相关代码，<br>token 越少越省钱）：</p>
+
+  <div class="bars">
+    <div class="bar-row">
+      <div class="bar-label"><span class="bar-name">AI 自己翻</span><span class="bar-val">约 3937 token</span></div>
+      <div class="bar-track"><div class="bar-fill fill-grep">反复搜索 + 读整文件</div></div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label"><span class="bar-name">普通搜索</span><span class="bar-val">约 1199 token</span></div>
+      <div class="bar-track"><div class="bar-fill fill-expand">整块结果</div></div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label"><span class="bar-name" style="color:var(--green)">STS-X 定位</span><span class="bar-val" style="color:var(--green)">约 336 token</span></div>
+      <div class="bar-track"><div class="bar-fill fill-locate">精准定位</div></div>
+    </div>
+  </div>
+
+  <p class="bar-note">✓ 一次定位就省下约 3600 token。<br>
+  你的 AI 每搜一次都在省钱；<br>
+  历史记录变短，后面每一轮都跟着省。<br>
+  <b style="color:var(--ink)">用得越多，省得越多。</b></p>
+</section>
+
+<!-- ⑤ 会中文 -->
+<section class="page">
+  <div class="num">04 · 会说人话</div>
+  <h2>不用记命令，<br>说人话就能搜。</h2>
+  <div class="card">
+    <p style="font-size:16px;line-height:1.85">
+      ❌ 老办法：<code>grep -rn "cache" src/</code><br><br>
+      ✅ STS-X：<b style="color:var(--ink)">"处理文件搜索的模块在哪？"</b><br>
+      <span class="green" style="font-weight:600">→ 0.5 秒，给出文件、行号、完整代码</span><br><br>
+      ✅ 直接搜中文：<b style="color:var(--ink)">"缓存"</b><br>
+      <span class="green" style="font-weight:600">→ 直接命中 cache 相关代码</span>
+    </p>
+  </div>
+  <div class="card" style="background:var(--green-soft);border-color:#CFE6DA">
+    <p style="font-size:15px;line-height:1.8">搜不到时它还会教 AI：<br>
+      "试试换成英文关键词、或直接搜函数名"<br>
+      —— 不让 AI（和你）在原地打转。</p>
+  </div>
+</section>
+
+<!-- ⑥ 为 AI 而生 -->
+<section class="page">
+  <div class="num">05 · 为 AI 而生</div>
+  <h2>它让 AI 更高效，<br>也更"聪明"。</h2>
+  <p class="lead">装好之后，AI 自己就会用，<br>你什么都不用管：</p>
+  <div class="feat">
+    <div class="ico">🔌</div>
+    <div><div class="t">原生接入 AI 客户端</div><div class="d">WorkBuddy、Claude 等配置一次，AI 写代码时自动调用，无需你教</div></div>
+  </div>
+  <div class="feat">
+    <div class="ico">📍</div>
+    <div><div class="t">结果自带精准坐标</div><div class="d">返回文件绝对路径 + 行号，AI 直接读，不用猜、不用翻</div></div>
+  </div>
+  <div class="feat">
+    <div class="ico">🧠</div>
+    <div><div class="t">AI 少走弯路</div><div class="d">找得快 → 想得清 → 写得对，整体效率明显提升</div></div>
+  </div>
+  <div class="feat">
+    <div class="ico">🚀</div>
+    <div><div class="t">单文件，跨平台</div><div class="d">Mac / Windows 同一个文件，拷过去就能跑</div></div>
+  </div>
+</section>
+
+<!-- ⑦ 怎么用 -->
+<section class="page">
+  <div class="num">06 · 30 秒上手</div>
+  <h2>装好它，<br>只需要 3 步。</h2>
+  <div class="steps">
+    <div class="step">
+      <div class="n">1</div>
+      <div><div class="t">下载</div><div class="d">拿一个 27MB 的文件（Mac 版或 Windows 版）</div></div>
+    </div>
+    <div class="step">
+      <div class="n">2</div>
+      <div><div class="t">让 AI 帮你装</div><div class="d">对它说一句"帮我装一下 STS-X"，它就给你装好</div></div>
+    </div>
+    <div class="step">
+      <div class="n">3</div>
+      <div><div class="t">开用</div><div class="d">AI 写代码时自动调用，全程不用管</div></div>
+    </div>
+  </div>
+  <p class="small" style="margin-top:20px">代码改了它自动更新索引，<br>你什么都不用管。</p>
+</section>
+
+<!-- ⑧ 结尾 -->
+<section class="page cta">
+  <div class="num">07 · 最后</div>
+  <div class="center" style="margin-bottom:8px"><span class="badge" style="display:inline-flex">✓ 已就绪 · 自测全过</span></div>
+  <div class="big center">让 AI 少"找"一点，<br>就多"写"一点。<br>
+    <span class="accent">省下的，都是你的。</span></div>
+  <p class="lead center" style="margin-top:16px">把"找代码"交给 STS-X，<br>你（和你的 AI）只负责想清楚要写什么。</p>
+  <div class="who">
+    <div>👨‍💻 <b>程序员</b> —— 项目越大，越离不开它</div>
+    <div>🤖 <b>用 AI 写代码的人</b> —— 让 AI 少花钱、更高效</div>
+    <div>🧩 <b>开源 / 多项目玩家</b> —— 几万个文件也秒搜</div>
+  </div>
+  <div class="footer">STS-X v3.2.0 · 给 AI 的代码搜索引擎 · 开源 MIT License</div>
+</section>
+
+</body>
+</html>
