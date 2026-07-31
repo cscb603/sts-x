@@ -62,8 +62,15 @@ STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代
 
 ### 一分钟上手
 
+**📥 下载（v3.2.0 / v5.1 毕业版）**
+
+| 平台 | 国内高速（蓝奏云） | GitHub Releases（备用） |
+|---|---|---|
+| Windows 10/11 64位 | [Win 版下载](https://wwbfk.lanzoub.com/iu0VM3zsz50h) | [sts-x.exe](https://github.com/cscb603/sts-x/releases) |
+| macOS 12+ | [Mac 版下载](https://wwbfk.lanzoub.com/iG0kx3zsz52j) | [sts-x](https://github.com/cscb603/sts-x/releases) |
+
 ```bash
-# 1. 下载（macOS）
+# 1. 下载（macOS，GitHub 备用源）
 curl -L https://github.com/cscb603/sts-x/releases/latest/download/sts-x -o sts-x && chmod +x sts-x
 sudo mv sts-x /usr/local/bin/
 
