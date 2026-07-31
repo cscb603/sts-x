@@ -22,7 +22,7 @@ use tantivy::{
     doc,
     query::{TermQuery, BooleanQuery, Occur, Query},
     schema::*,
-    tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter},
+    tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter, Token, TokenStream, Tokenizer},
     Term,
     IndexWriter, IndexReader, Index, ReloadPolicy,
     TantivyDocument,
@@ -92,6 +92,167 @@ fn is_noise_path(rel_str: &str) -> bool {
     NOISE_PATTERNS.iter().any(|p| rel_str.contains(p))
 }
 
+/// True for CJK ideographs / kana / hangul (indexed as bigrams, not single tokens).
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3400}'..='\u{4dbf}' | // CJK Ext A
+        '\u{4e00}'..='\u{9fff}' | // CJK Unified
+        '\u{3040}'..='\u{30ff}' | // Hiragana / Katakana
+        '\u{ac00}'..='\u{d7af}'   // Hangul
+    )
+}
+
+/// Zero-dependency CJK-aware tokenizer (G1 fix, whitepaper §7 Phase 1).
+///
+/// Why: `SimpleTokenizer` splits on `!is_alphanumeric()`, and CJK ideographs
+/// ARE alphanumeric → an entire Chinese phrase became ONE token, so any
+/// multi-char NL query could never match (the `文件搜索` all-miss bug).
+///
+/// Rule (mirrors both index-time and query-time):
+/// - ASCII/alnum runs → one lowercase token per run (unchanged behavior);
+/// - CJK runs → character bigrams (`文件搜索` → `文件` `件搜` `搜索`),
+///   single leftover char becomes a unigram so 2-char phrases still match.
+#[derive(Clone, Default)]
+pub(crate) struct CjkTokenizer;
+
+impl Tokenizer for CjkTokenizer {
+    type TokenStream<'a> = CjkTokenStream;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        CjkTokenStream::new(text)
+    }
+}
+
+pub(crate) struct CjkTokenStream {
+    tokens: Vec<Token>,
+    idx: usize,
+}
+
+impl CjkTokenStream {
+    fn new(text: &str) -> Self {
+        let mut tokens = Vec::new();
+        let mut position = 0usize;
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let (_, c) = chars[i];
+            if is_cjk(c) {
+                let start = i;
+                while i < chars.len() && is_cjk(chars[i].1) {
+                    i += 1;
+                }
+                let seg = &chars[start..i];
+                if seg.len() == 1 {
+                    let (off, ch) = seg[0];
+                    tokens.push(Token {
+                        offset_from: off,
+                        offset_to: off + ch.len_utf8(),
+                        position,
+                        text: ch.to_string(),
+                        position_length: 1,
+                    });
+                    position += 1;
+                } else {
+                    for w in 0..seg.len() - 1 {
+                        let (off0, ch0) = seg[w];
+                        let (off1, ch1) = seg[w + 1];
+                        let mut s = String::with_capacity(4);
+                        s.push(ch0);
+                        s.push(ch1);
+                        tokens.push(Token {
+                            offset_from: off0,
+                            offset_to: off1 + ch1.len_utf8(),
+                            position,
+                            text: s,
+                            position_length: 1,
+                        });
+                        position += 1;
+                    }
+                }
+            } else if c.is_alphanumeric() {
+                let start_off = chars[i].0;
+                while i < chars.len() && chars[i].1.is_alphanumeric() && !is_cjk(chars[i].1) {
+                    i += 1;
+                }
+                let end_off = chars[i - 1].0 + chars[i - 1].1.len_utf8();
+                let segment = &text[start_off..end_off];
+                tokens.push(Token {
+                    offset_from: start_off,
+                    offset_to: end_off,
+                    position,
+                    text: segment.to_lowercase(),
+                    position_length: 1,
+                });
+                position += 1;
+            } else {
+                i += 1;
+            }
+        }
+        Self { tokens, idx: 0 }
+    }
+}
+
+impl TokenStream for CjkTokenStream {
+    fn advance(&mut self) -> bool {
+        if self.idx < self.tokens.len() {
+            self.idx += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn token(&self) -> &Token {
+        &self.tokens[self.idx.saturating_sub(1)]
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.tokens[self.idx.saturating_sub(1)]
+    }
+}
+
+/// Query-side CJK tokenization — MUST produce the exact same terms as the
+/// index-side `CjkTokenizer` above, so TermQueries align with index terms.
+pub(crate) fn cjk_bigram_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if is_cjk(c) {
+            let mut seg = String::new();
+            while i < chars.len() && is_cjk(chars[i]) {
+                seg.push(chars[i]);
+                i += 1;
+            }
+            let cs: Vec<char> = seg.chars().collect();
+            if cs.len() == 1 {
+                terms.push(cs[0].to_string());
+            } else {
+                for w in 0..cs.len() - 1 {
+                    let mut s = String::with_capacity(4);
+                    s.push(cs[w]);
+                    s.push(cs[w + 1]);
+                    terms.push(s);
+                }
+            }
+        } else if c.is_alphanumeric() {
+            let mut seg = String::new();
+            while i < chars.len() && chars[i].is_alphanumeric() && !is_cjk(chars[i]) {
+                seg.push(chars[i]);
+                i += 1;
+            }
+            let t = seg.to_lowercase();
+            if !t.is_empty() && t.len() <= 40 {
+                terms.push(t);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    terms
+}
+
 impl SearchIndex {
     /// Create a new empty search index
     pub fn new(config: IndexConfig, embed_model: Option<EmbeddingModel>) -> Result<Self> {
@@ -99,18 +260,23 @@ impl SearchIndex {
             .filter(RemoveLongFilter::limit(128))
             .filter(LowerCaser)
             .build();
+        // G1: CJK-aware tokenizer for name/signature/code/doc_comment.
+        let cjk_tokenizer = TextAnalyzer::builder(CjkTokenizer)
+            .filter(RemoveLongFilter::limit(128))
+            .filter(LowerCaser)
+            .build();
 
         let mut schema_builder = Schema::builder();
         schema_builder.add_text_field(FIELD_PATH, STRING | STORED);
-        schema_builder.add_text_field(FIELD_NAME, TEXT | STORED);
-        schema_builder.add_text_field(FIELD_SIGNATURE, TEXT | STORED);
-        let code_options = TextOptions::default().set_indexing_options(
+        let cjk_options = TextOptions::default().set_indexing_options(
             TextFieldIndexing::default()
-                .set_tokenizer("code")
+                .set_tokenizer("cjk")
                 .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         ).set_stored();
-        schema_builder.add_text_field(FIELD_CODE, code_options.clone());
-        schema_builder.add_text_field(FIELD_DOC_COMMENT, TEXT | STORED);
+        schema_builder.add_text_field(FIELD_NAME, cjk_options.clone());
+        schema_builder.add_text_field(FIELD_SIGNATURE, cjk_options.clone());
+        schema_builder.add_text_field(FIELD_CODE, cjk_options.clone());
+        schema_builder.add_text_field(FIELD_DOC_COMMENT, cjk_options.clone());
         schema_builder.add_text_field(FIELD_LANGUAGE, STRING | STORED);
         schema_builder.add_text_field(FIELD_KIND, STRING | STORED);
         schema_builder.add_u64_field(FIELD_START_LINE, STORED);
@@ -124,11 +290,13 @@ impl SearchIndex {
             let idx = Index::open_in_dir(&index_path)
                 .context("Failed to open existing tantivy index")?;
             idx.tokenizers().register("code", code_tokenizer);
+            idx.tokenizers().register("cjk", cjk_tokenizer);
             idx
         } else {
             let idx = Index::create_in_dir(&index_path, schema.clone())
                 .context("Failed to create tantivy index")?;
             idx.tokenizers().register("code", code_tokenizer);
+            idx.tokenizers().register("cjk", cjk_tokenizer);
             idx
         };
 
@@ -426,15 +594,15 @@ impl SearchIndex {
                     match std::fs::read(path) {
                         Ok(bytes) => {
                             let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
-                            if decoded.len() > 0 {
+                            if !decoded.is_empty() {
                                 decoded.to_string()
                             } else {
                                 let (decoded, _, _) = encoding_rs::GB18030.decode(&bytes);
-                                if decoded.len() > 0 {
+                                if !decoded.is_empty() {
                                     decoded.to_string()
                                 } else {
                                     let (decoded, _, _) = encoding_rs::BIG5.decode(&bytes);
-                                    if decoded.len() > 0 {
+                                    if !decoded.is_empty() {
                                         decoded.to_string()
                                     } else {
                                         continue;
@@ -578,14 +746,22 @@ impl SearchIndex {
         Ok(out)
     }
 
-    /// Search via BM25 full-text
-    pub fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<(f32, &IndexedBlock)>> {
+    /// Search via BM25 full-text.
+    /// If `path_filter` is set, only blocks whose relative path matches it
+    /// (exact path or suffix filter) are returned.
+    pub fn search_text(
+        &self,
+        query: &str,
+        top_k: usize,
+        path_filter: Option<&str>,
+    ) -> Result<Vec<(f32, &IndexedBlock)>> {
         let searcher = self.text_reader.searcher();
         let path_field = self.schema.get_field(FIELD_PATH)?;
         let name_field = self.schema.get_field(FIELD_NAME)?;
         let sig_field = self.schema.get_field(FIELD_SIGNATURE)?;
         let code_field = self.schema.get_field(FIELD_CODE)?;
         let doc_field = self.schema.get_field(FIELD_DOC_COMMENT)?;
+        let sl_field = self.schema.get_field(FIELD_START_LINE)?;
 
         // --- Robust query tokenization (fix for `Foo::bar`, `a.b.c`, `Vec<X>`)
         // Tantivy's QueryParser treats `::` / `(` / `*` etc. as illegal syntax
@@ -596,12 +772,12 @@ impl SearchIndex {
         // includes `_` as a separator. So `select_best_cfg` → {select, best, cfg},
         // `Cli::parse` → {cli, parse}, `files.len` → {files, len}.
         // We match exactly this split so TermQueries align with index terms.
-        let mut terms: Vec<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .map(|s| s.to_lowercase())
-            .filter(|s| !s.is_empty())
-            .filter(|s| s.len() <= 40)
-            .collect();
+        //
+        // G1: CJK runs are emitted as character bigrams (matching the index-side
+        // CjkTokenizer), so natural-language Chinese queries hit instead of
+        // vanishing into a single never-matching token.
+        let mut terms: Vec<String> = cjk_bigram_terms(query);
+        terms.retain(|t| t.len() <= 40);
         let mut seen = std::collections::HashSet::new();
         terms.retain(|t| seen.insert(t.clone()));
         if terms.is_empty() {
@@ -669,10 +845,19 @@ impl SearchIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let start_line = retrieved_doc
+                .get_first(sl_field)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
 
-            // Find matching vector store entry by path
+            // Map the tantivy doc back to its vector_store block. Matching by
+            // PATH ALONE is wrong: one file yields many blocks sharing the same
+            // path, so `find(path)` returns the file's FIRST block (→ wrong
+            // code for any hit below the first function). Match path + start_line,
+            // which is unique per block and segment-independent.
             if let Some(entry) = self.vector_store.iter().find(|e| {
                 e.block.path.display().to_string() == path_str
+                    && e.block.start_line as u64 == start_line
             }) {
                 // Normalize BM25 score to 0-1 range
                 let mut norm_score = (score / 10.0).clamp(0.0, 1.0);
@@ -695,6 +880,17 @@ impl SearchIndex {
                 }
 
                 results.push((norm_score, entry));
+            }
+        }
+
+        // P0-3: path_filter — keep only blocks whose relative path contains the
+        // filter (covers `cache.rs`, `src/cache.rs`, `src/` directory filters).
+        if let Some(pf) = path_filter {
+            let pf = pf.trim();
+            if !pf.is_empty() {
+                results.retain(|(_, ib)| {
+                    ib.block.path.display().to_string().contains(pf)
+                });
             }
         }
 
@@ -725,8 +921,9 @@ impl SearchIndex {
         query: &str,
         query_embedding: Option<&[f32]>,
         top_k: usize,
+        path_filter: Option<&str>,
     ) -> Result<Vec<(f32, &IndexedBlock)>> {
-        let text_results = self.search_text(query, top_k * 2)?;
+        let text_results = self.search_text(query, top_k * 2, path_filter)?;
         let mut candidates: HashMap<usize, f32> = HashMap::new();
 
         // BM25 RRF contribution
@@ -897,5 +1094,126 @@ impl SearchIndex {
             sl_field => block.start_line as u64,
             el_field => block.end_line as u64,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{BlockKind, CodeBlock, IndexConfig};
+    use std::path::PathBuf;
+
+    fn test_block(path: &str, name: &str, code: &str, start: usize) -> CodeBlock {
+        CodeBlock {
+            path: PathBuf::from(path),
+            abs_path: PathBuf::from(path),
+            kind: BlockKind::Function,
+            name: name.to_string(),
+            signature: format!("fn {}() {{", name),
+            doc_comment: String::new(),
+            code: code.to_string(),
+            language: "rust".to_string(),
+            start_line: start,
+            end_line: start + code.lines().count(),
+            imports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn path_filter_restricts_results() {
+        let idx_path = "/tmp/stsx-path-filter-test";
+        std::fs::remove_dir_all(idx_path).ok();
+        let cfg = IndexConfig {
+            project_root: PathBuf::from("."),
+            index_path: PathBuf::from(idx_path),
+            ..Default::default()
+        };
+        let mut idx = SearchIndex::new(cfg, None).unwrap();
+        idx.index_blocks(vec![
+            test_block("src/cache.rs", "cache_helper", "fn cache_helper() { let x = 42; }", 1),
+            test_block("src/search.rs", "search_helper", "fn search_helper() { let y = 43; }", 1),
+        ]).unwrap();
+
+        // No filter → both blocks contain `helper`; query hits both
+        let both = idx.search_text("helper", 10, None).unwrap();
+        assert_eq!(both.len(), 2, "no filter should return both");
+
+        // Filter to cache.rs → only that block
+        let cached = idx.search_text("helper", 10, Some("cache.rs")).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert!(cached[0].1.block.path.display().to_string().contains("cache.rs"));
+
+        // Filter to a non-matching path → empty
+        let none = idx.search_text("helper", 10, Some("nonexistent.rs")).unwrap();
+        assert!(none.is_empty());
+    }
+
+    fn tokenize_text(text: &str) -> Vec<String> {
+        let mut tok = CjkTokenizer;
+        let mut stream = tok.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        out
+    }
+
+    #[test]
+    fn cjk_tokenizer_bigrams_chinese() {
+        // G1 core: `文件搜索` → bigrams, NOT one giant token.
+        assert_eq!(tokenize_text("文件搜索"), vec!["文件", "件搜", "搜索"]);
+    }
+
+    #[test]
+    fn cjk_tokenizer_ascii_alnum_unchanged() {
+        // ASCII behavior must not regress: `_` still splits, lowercase applied.
+        assert_eq!(tokenize_text("run_search"), vec!["run", "search"]);
+        assert_eq!(tokenize_text("Cli::parse"), vec!["cli", "parse"]);
+    }
+
+    #[test]
+    fn cjk_tokenizer_mixed_text() {
+        // CJK/ASCII boundary does NOT cross-split (index and query sides agree).
+        assert_eq!(
+            tokenize_text("搜索McpServer模块"),
+            vec!["搜索", "mcpserver", "模块"]
+        );
+    }
+
+    #[test]
+    fn cjk_tokenizer_single_cjk_char() {
+        // Single leftover CJK char becomes a unigram so 2-char phrases still match.
+        assert_eq!(tokenize_text("搜"), vec!["搜"]);
+    }
+
+    #[test]
+    fn cjk_query_terms_match_index_terms() {
+        // Query-side bigrams must equal index-side bigrams for the same text.
+        assert_eq!(cjk_bigram_terms("文件搜索"), vec!["文件", "件搜", "搜索"]);
+        assert_eq!(cjk_bigram_terms("run_search"), vec!["run", "search"]);
+        assert_eq!(cjk_bigram_terms("文件 搜索"), vec!["文件", "搜索"]);
+    }
+}
+
+
+#[cfg(test)]
+mod tests_extra {
+    use super::cjk_bigram_terms;
+
+    #[test]
+    fn cjk_query_terms_mixed_with_ascii() {
+        // NL query mixing CJK + ASCII symbols must produce aligned terms.
+        assert_eq!(
+            cjk_bigram_terms("McpServer 文件搜索"),
+            vec!["mcpserver", "文件", "件搜", "搜索"]
+        );
+    }
+
+    #[test]
+    fn cjk_query_terms_empty_and_punct() {
+        assert!(cjk_bigram_terms("").is_empty());
+        assert!(cjk_bigram_terms("!!! ---").is_empty());
+        assert_eq!(cjk_bigram_terms("a.b.c"), vec!["a", "b", "c"]);
+        assert_eq!(cjk_bigram_terms("Foo::bar"), vec!["foo", "bar"]);
     }
 }

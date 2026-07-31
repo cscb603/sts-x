@@ -19,6 +19,11 @@
 # Release packages
 sts-x-win*
 
+# AI 项目文档（白皮书/评估报告含内部决策，不公开）
+.workbuddy/
+plans/STS-X-*
+plans/WHITEPAPER-*
+
 # python caches
 scripts/__pycache__/
 __pycache__/

@@ -36,8 +36,8 @@ pub struct AiSearchOutput {
     /// (`file_count` + top-3 by score) — same shape on CLI and MCP paths.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregated: Option<Vec<AiAggregateGroup>>,
-    #[serde(rename = "_ai_instructions")]
-    pub _ai_instructions: &'static str,
+    #[serde(rename = "_ai_instructions", skip_serializing_if = "Option::is_none")]
+    pub _ai_instructions: Option<&'static str>,
 }
 
 /// R3: one aggregated group — a symbol that matched across multiple blocks/files.
@@ -91,7 +91,7 @@ impl From<SearchResponse> for AiSearchOutput {
                     .collect()
             }),
             aggregated: None, // filled by postprocess::aggregate_results (R3)
-            _ai_instructions: AI_HINT,
+            _ai_instructions: Some(AI_HINT),
         }
     }
 }
@@ -129,9 +129,13 @@ pub struct AiLocateOutput {
 #[derive(Debug, Serialize)]
 pub struct AiLocateItem {
     pub file: String,
+    /// Absolute path so the AI can Read the file directly (whitepaper §7 P0-2).
+    pub abs_path: String,
     pub line: usize,
     pub context: String,
     pub score: f32,
+    /// Symbol name of the containing AST block ("" for plain file hits).
+    pub name: String,
 }
 
 impl From<SearchResponse> for AiLocateOutput {
@@ -148,9 +152,11 @@ impl From<LocateMatch> for AiLocateItem {
     fn from(m: LocateMatch) -> Self {
         AiLocateItem {
             file: m.file,
+            abs_path: m.abs_path,
             line: m.line,
             context: m.context,
             score: m.score,
+            name: m.name,
         }
     }
 }
@@ -163,8 +169,8 @@ pub struct AiFileOutput {
     pub matches: Vec<AiFileItem>,
     pub total_hits: usize,
     pub search_time_ms: u64,
-    #[serde(rename = "_ai_instructions")]
-    pub _ai_instructions: &'static str,
+    #[serde(rename = "_ai_instructions", skip_serializing_if = "Option::is_none")]
+    pub _ai_instructions: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,7 +205,7 @@ impl AiFileOutput {
                 .collect(),
             total_hits: 0, // filled by caller (matches are built already)
             search_time_ms,
-            _ai_instructions: AI_HINT,
+            _ai_instructions: Some(AI_HINT),
         }
     }
 }
@@ -248,4 +254,46 @@ pub fn format_human_readable(resp: &SearchResponse) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::LocateMatch;
+
+    #[test]
+    fn locate_item_carries_abs_path_and_name() {
+        let m = LocateMatch {
+            score: 0.9,
+            file: "src/mcp/mod.rs".to_string(),
+            abs_path: "/abs/libs/core_lib/src/mcp/mod.rs".to_string(),
+            line: 64,
+            context: "pub struct McpServer {".to_string(),
+            kind: "struct".to_string(),
+            name: "McpServer".to_string(),
+        };
+        let item: AiLocateItem = m.into();
+        assert_eq!(item.abs_path, "/abs/libs/core_lib/src/mcp/mod.rs");
+        assert_eq!(item.name, "McpServer");
+        assert_eq!(item.line, 64);
+    }
+
+    #[test]
+    fn locate_output_serializes_abs_path_field() {
+        let m = LocateMatch {
+            score: 1.0,
+            file: "src/mcp/mod.rs".to_string(),
+            abs_path: "/abs/libs/core_lib/src/mcp/mod.rs".to_string(),
+            line: 64,
+            context: "pub struct McpServer {".to_string(),
+            kind: "struct".to_string(),
+            name: "McpServer".to_string(),
+        };
+        let item: AiLocateItem = m.into();
+        let json = serde_json::to_value(&item).unwrap();
+        // Whitepaper §7 P0-2: AI must be able to Read the file from locate output.
+        assert_eq!(json["abs_path"], "/abs/libs/core_lib/src/mcp/mod.rs");
+        assert!(json.get("abs_path").is_some());
+        assert!(json.get("name").is_some());
+    }
 }

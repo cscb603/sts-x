@@ -70,6 +70,9 @@ struct FileQuery {
     top_k: usize,
     #[serde(default)]
     name_only: bool,
+    /// P1-3: cap output to ~this many tokens (0 = unlimited), mirroring CLI.
+    #[serde(default)]
+    max_tokens: usize,
 }
 
 fn default_content() -> bool {
@@ -117,7 +120,9 @@ fn search_tool_schema() -> Tool {
                 "top_k": { "type": "integer", "description": "Number of results (default 2)", "default": 2 },
                 "context_lines": { "type": "integer", "description": "Lines around each match in expand mode (default 0 = full block, >0 = window)", "default": 0 },
                 "filename": { "type": "boolean", "description": "Shortcut: search file names only" },
-                "all": { "type": "boolean", "description": "Shortcut: search all files" }
+                "all": { "type": "boolean", "description": "Shortcut: search all files" },
+                "path_filter": { "type": "string", "description": "Restrict results to files whose path contains this substring (e.g. \"cache.rs\" or \"src/cache.rs\")" },
+                "hint": { "type": "boolean", "description": "Set false to omit the _ai_instructions field from expand output (default true)", "default": true }
             },
             "required": ["query"]
         }),
@@ -136,7 +141,8 @@ fn file_tool_schema() -> Tool {
                 "path": { "type": "string", "description": "Directory to search (default: server cwd)" },
                 "content": { "type": "boolean", "description": "Also match file content (default true). Set false for name-only.", "default": true },
                 "name_only": { "type": "boolean", "description": "Alias for content=false (name match only)" },
-                "top_k": { "type": "integer", "description": "Maximum results (default 20)", "default": 20 }
+                "top_k": { "type": "integer", "description": "Maximum results (default 20)", "default": 20 },
+                "max_tokens": { "type": "integer", "description": "Cap output to roughly this many tokens (0 = unlimited)", "default": 0 }
             },
             "required": ["query"]
         }),
@@ -208,7 +214,7 @@ async fn handle_search(
     } else if query.all {
         SearchMode::All
     } else {
-        query.mode.clone()
+        query.mode
     };
 
     let (key, _config) = match get_or_create_engine(&state, project_path.as_ref()).await {
@@ -223,7 +229,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: "error: failed to initialize search engine",
+                _ai_instructions: Some("error: failed to initialize search engine"),
             }));
         }
     };
@@ -240,7 +246,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: "error: engine not found",
+                _ai_instructions: Some("error: engine not found"),
             }));
         }
     };
@@ -276,6 +282,10 @@ async fn handle_search(
             } else {
                 postprocess::post_process_results(&mut resp, &query_str, context_lines);
                 let mut out: AiSearchOutput = resp.into();
+                // P1-2: caller may request `hint: false` to drop _ai_instructions (~200 tok).
+                if !query.hint {
+                    out._ai_instructions = None;
+                }
                 // R3: fold hot symbols (same shape on CLI and MCP paths).
                 postprocess::aggregate_results(&mut out);
                 Json(AiResponse::Expand(out))
@@ -291,7 +301,7 @@ async fn handle_search(
                 search_time_ms: 0,
                 multi_hop: None,
                 aggregated: None,
-                _ai_instructions: "error: search failed",
+                _ai_instructions: Some("error: search failed"),
             }))
         }
     }
@@ -323,12 +333,28 @@ async fn handle_file(
                 matches: Vec::new(),
                 total_hits: 0,
                 search_time_ms: 0,
-                _ai_instructions: "error: file search failed",
+                _ai_instructions: Some("error: file search failed"),
             });
         }
     };
     let elapsed = start.elapsed().as_millis() as u64;
-    let mut out = AiFileOutput::from_matches(body.query, matches, elapsed);
+    // P1-3: same token-budget truncation as the CLI `file` subcommand.
+    let out_matches: Vec<crate::types::FileMatch> = if body.max_tokens > 0 {
+        let mut total: usize = 0;
+        let mut truncated = Vec::new();
+        for m in matches {
+            let tok = m.context.chars().count().div_ceil(2);
+            if total + tok > body.max_tokens && !truncated.is_empty() {
+                break;
+            }
+            total += tok;
+            truncated.push(m);
+        }
+        truncated
+    } else {
+        matches
+    };
+    let mut out = AiFileOutput::from_matches(body.query, out_matches, elapsed);
     out.total_hits = out.matches.len();
     Json(out)
 }

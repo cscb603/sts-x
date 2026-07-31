@@ -58,7 +58,8 @@ fn fallback_cache_root() -> PathBuf {
     base.join("sts-x")
 }
 
-const INDEX_VERSION: &str = "v2";
+// v3: CJK bigram tokenizer introduced (index terms changed) → old v2 indexes must rebuild.
+const INDEX_VERSION: &str = "v3";
 
 pub fn index_dir_for(project_root: &Path) -> PathBuf {
     let hash = path_hash(project_root);
@@ -173,15 +174,27 @@ pub fn is_index_stale(index_path: &Path, project_root: &Path) -> bool {
     has_newer_files(project_root, &index_mtime, 0)
 }
 
+/// P2-1: cap the stale-scan tree walk — very deep / huge trees (monorepos,
+/// vendored docs) must not turn a first search into a multi-second walk.
+const MAX_STALE_DEPTH: u32 = 6;
+const MAX_STALE_FILES: usize = 5_000;
+
 fn has_newer_files(dir: &Path, threshold: &std::time::SystemTime, depth: u32) -> bool {
-    if depth > 8 {
+    if depth > MAX_STALE_DEPTH {
         return false;
     }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return false,
     };
+    let mut scanned = 0usize;
     for entry in entries.flatten() {
+        scanned += 1;
+        if scanned > MAX_STALE_FILES {
+            // Too many entries to scan cheaply — force a rebuild instead of
+            // risking a stale index on a huge tree (rebuild is bounded work).
+            return true;
+        }
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.starts_with('.') && name != ".github" && name != ".config" {
@@ -202,4 +215,16 @@ fn has_newer_files(dir: &Path, threshold: &std::time::SystemTime, depth: u32) ->
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::INDEX_VERSION;
+
+    #[test]
+    fn index_version_is_v3_for_cjk_rebuild() {
+        // v2 indexes used SimpleTokenizer (CJK = 1 giant token) and must be
+        // invalidated by the v3 bump; this test pins the constant.
+        assert_eq!(INDEX_VERSION, "v3");
+    }
 }

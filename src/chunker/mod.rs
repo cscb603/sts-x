@@ -236,7 +236,7 @@ impl Chunker {
         loop {
             let node = cursor.node();
             let kind = node.kind();
-            if node_types.iter().any(|t| *t == kind) {
+            if node_types.contains(&kind) {
                 collect_single_block(
                     node, source, abs_path, path, language, blocks,
                 );

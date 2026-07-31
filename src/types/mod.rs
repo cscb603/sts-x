@@ -98,6 +98,10 @@ pub struct SearchQuery {
     pub languages: Option<Vec<String>>,
     #[serde(default)]
     pub path_filter: Option<String>,
+    /// P1-2: set false to omit `_ai_instructions` from expand output
+    /// (CLI `--no-hint` / MCP body `"hint": false`). Default true.
+    #[serde(default = "default_true")]
+    pub hint: bool,
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     #[serde(default = "default_context")]
@@ -129,6 +133,7 @@ impl Default for SearchQuery {
             output_mode: None,
             languages: None,
             path_filter: None,
+            hint: true,
             top_k: 2,
             // 0 = full block (expand default is complete AST block, not a window)
             context_lines: 0,
@@ -177,6 +182,10 @@ pub struct IndexConfig {
     pub languages: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub embedding_dim: usize,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for IndexConfig {

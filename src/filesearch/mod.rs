@@ -189,13 +189,7 @@ fn search_files_walk(
 }
 
 fn build_match(path: &str, matched_by: &str, line: usize, context: String) -> FileMatch {
-    let abs = if path.starts_with('/')
-        || (path.len() >= 2 && path.as_bytes()[1] == b':')
-    {
-        PathBuf::from(path)
-    } else {
-        PathBuf::from(path)
-    };
+    let abs = PathBuf::from(path);
     let meta = std::fs::metadata(&abs);
     let (size, mtime) = match meta {
         Ok(m) => {

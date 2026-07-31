@@ -95,16 +95,33 @@ impl SearchEngine {
         let mut seen_paths: HashSet<String> = HashSet::new();
 
         // ── Path A: BM25 over AST chunks (fast, ranked) ──────────────
-        let raw = self.index.search_text(&query.query, query.top_k * 3)?;
+        let raw = self.index.search_text(&query.query, query.top_k * 3, query.path_filter.as_deref())?;
         for (score, ib) in raw.iter() {
             if matches.len() >= budget {
                 break;
             }
             let lines: Vec<&str> = ib.block.code.lines().collect();
-            if let Some((off, _)) = lines.iter().enumerate().find(|(_, line)| {
-                let low = line.to_lowercase();
-                terms.iter().any(|t| low.contains(t))
-            }) {
+            // Definition-line priority (whitepaper §7 P0-2): the signature line
+            // (`fn foo(` / `pub struct X {`) is line 0 of most AST blocks —
+            // prefer it over a body line so the AI lands ON the definition,
+            // not on a doc comment / inner call.
+            let hit_off = if !lines.is_empty() {
+                let sig_hit = {
+                    let low = lines[0].to_lowercase();
+                    terms.iter().any(|t| low.contains(t))
+                };
+                if sig_hit {
+                    Some(0)
+                } else {
+                    lines.iter().enumerate().find(|(_, line)| {
+                        let low = line.to_lowercase();
+                        terms.iter().any(|t| low.contains(t))
+                    }).map(|(off, _)| off)
+                }
+            } else {
+                None
+            };
+            if let Some(off) = hit_off {
                 let abs_line = ib.block.start_line + off;
                 let trimmed = lines[off].trim();
                 let ctx: String = if trimmed.chars().count() > 48 {
@@ -202,6 +219,7 @@ impl SearchEngine {
             &query.query,
             query_embedding.as_deref(),
             query.top_k * 3,
+            query.path_filter.as_deref(),
         )?;
 
         #[cfg(feature = "semantic")]
@@ -252,7 +270,7 @@ impl SearchEngine {
         let start = Instant::now();
 
         // Step 1: Get code search results from index
-        let code_results = self.index.search_text(&query.query, query.top_k * 2)?;
+        let code_results = self.index.search_text(&query.query, query.top_k * 2, query.path_filter.as_deref())?;
         let code_results = normalize_scores(&code_results, query.top_k);
 
         // Step 2: Live grep non-code files
@@ -313,7 +331,7 @@ impl SearchEngine {
 /// Uses the same rule as CLI: (char_count + 1) / 2.
 fn estimate_tokens(text: &str) -> usize {
     let chars = text.chars().count();
-    (chars + 1) / 2
+    chars.div_ceil(2)
 }
 
 /// Truncate results to fit within `max_tokens` budget.
@@ -342,13 +360,30 @@ fn truncate_by_tokens(results: &mut Vec<SearchResult>, max_tokens: usize) {
     *results = keep;
 }
 
-/// Normalize BM25 scores to 0-1 range and take top_k
+/// Normalize BM25 scores to 0-1 range and take top_k.
+/// P1-1: recency boost — files modified ≤1 day ago get +0.15, ≤7 days +0.10,
+/// so freshly-touched code surfaces above stale hits of similar relevance.
 fn normalize_scores(raw: &[(f32, &crate::indexer::IndexedBlock)], top_k: usize) -> Vec<SearchResult> {
     let max_score = raw.first().map(|(s, _)| *s).unwrap_or(1.0);
+    let now = std::time::SystemTime::now();
     raw.iter()
         .take(top_k)
         .map(|(score, ib)| {
-            let norm_score = if max_score > 0.0 { score / max_score } else { 0.0 };
+            let mut norm_score = if max_score > 0.0 { score / max_score } else { 0.0 };
+            // Recency boost from the file's mtime (read live from disk — the
+            // whitepaper's manifest.json does not exist in this codebase).
+            if let Ok(meta) = std::fs::metadata(&ib.block.abs_path) {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        let secs = age.as_secs();
+                        if secs <= 86_400 {
+                            norm_score += 0.15;
+                        } else if secs <= 7 * 86_400 {
+                            norm_score += 0.10;
+                        }
+                    }
+                }
+            }
             SearchResult {
                 score: norm_score,
                 block: ib.block.clone(),

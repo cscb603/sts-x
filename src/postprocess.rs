@@ -197,7 +197,7 @@ mod tests {
             search_time_ms: 1,
             multi_hop: None,
             aggregated: None,
-            _ai_instructions: "",
+            _ai_instructions: Some(""),
         }
     }
 

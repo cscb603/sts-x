@@ -79,6 +79,16 @@ pub enum Commands {
         /// lowest-score entries until the budget is met.
         #[arg(long, default_value = "0")]
         max_tokens: usize,
+        /// Restrict results to files whose path contains this substring
+        /// (e.g. --path-filter cache.rs or --path-filter src/cache.rs)
+        #[arg(long)]
+        path_filter: Option<String>,
+        /// Omit the `_ai_instructions` field from expand output (saves ~200 tok)
+        #[arg(long)]
+        no_hint: bool,
+        /// Sort results by file modification time, most recent first
+        #[arg(long)]
+        sort_recent: bool,
     },
     /// AI one-shot search (CLI path): auto-routes symbol→locate, NL→expand+budget.
     /// Shares src/router.rs with the MCP `search` tool — identical behavior on both paths.
@@ -147,14 +157,14 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             let p = resolve_path(path);
             cmd_index(&p, output, languages).await
         }
-        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, max_tokens, .. } => {
+        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, max_tokens, path_filter, no_hint, sort_recent, .. } => {
             let p = resolve_path(path);
             let mode = if *locate {
                 crate::types::OutputMode::Locate
             } else {
                 crate::types::OutputMode::Expand
             };
-            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens).await
+            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens, path_filter.as_deref(), *no_hint, *sort_recent).await
         }
         Commands::Ai { query, path, max_tokens } => {
             let p = resolve_path(path);
@@ -165,7 +175,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 Some(p) => normalize_path(p),
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
-            cmd_file(&query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
+            cmd_file(query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
         }
         Commands::Serve { path, index_path, host, port } => {
             let p = resolve_path(path);
@@ -199,6 +209,9 @@ async fn run_ai(query: &str, root: &Path, max_tokens_override: usize) -> anyhow:
         0,                  // context_lines: full block for expand
         false,              // human output: JSON for AI
         max_tokens,
+        None,               // path_filter
+        false,              // no_hint
+        false,              // sort_recent
     )
     .await
 }
@@ -312,6 +325,9 @@ async fn cmd_search(
     context_lines: usize,
     human_output: bool,
     max_tokens: usize,
+    path_filter: Option<&str>,
+    no_hint: bool,
+    sort_recent: bool,
 ) -> anyhow::Result<()> {
     let config = build_config(root, custom_index);
 
@@ -337,10 +353,27 @@ async fn cmd_search(
         top_k,
         context_lines,
         max_tokens,
+        path_filter: path_filter.map(|s| s.to_string()),
+        hint: !no_hint,
         ..Default::default()
     };
 
     let mut response = engine.search(query)?;
+
+    // P1-1: `--sort recent` — reorder results by file mtime (newest first).
+    if sort_recent {
+        response.results.sort_by(|a, b| {
+            let mtime = |r: &crate::types::SearchResult| -> u64 {
+                std::fs::metadata(&r.block.abs_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            };
+            mtime(b).cmp(&mtime(a))
+        });
+    }
 
     if human_output {
         // Human readable is always the full-block (expand) view.
@@ -352,6 +385,10 @@ async fn cmd_search(
     } else {
         postprocess::post_process_results(&mut response, query_str, context_lines);
         let mut ai_output: crate::types::format::AiSearchOutput = response.into();
+        // P1-2: `--no-hint` drops _ai_instructions (~200 tok saved per call).
+        if no_hint {
+            ai_output._ai_instructions = None;
+        }
         // R3: fold hot symbols (same shape on CLI and MCP paths).
         postprocess::aggregate_results(&mut ai_output);
         println!("{}", serde_json::to_string_pretty(&ai_output)?);
@@ -380,7 +417,7 @@ async fn cmd_file(
         let mut total: usize = 0;
         let mut truncated = Vec::new();
         for m in matches {
-            let tok = (m.context.chars().count() + 1) / 2;
+            let tok = m.context.chars().count().div_ceil(2);
             if total + tok > max_tokens && !truncated.is_empty() {
                 break;
             }
