@@ -194,10 +194,10 @@ mod tests {
             mode: "expand",
             total_hits: results.len(),
             results,
+            _ai_instructions: None,
             search_time_ms: 1,
             multi_hop: None,
             aggregated: None,
-            _ai_instructions: Some(String::new()),
         }
     }
 

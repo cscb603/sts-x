@@ -74,11 +74,35 @@ pub fn resolve_index_path(project_root: &Path, custom: Option<&PathBuf>) -> Path
     }
 }
 
-const PROJECT_MARKERS: &[&str] = &[
-    ".git", "Cargo.toml", "package.json", "go.mod", "pyproject.toml",
-    "setup.py", "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
-    ".stsx-root",
+/// Strong project markers — alone they prove a real project root.
+/// (`.stsx-root` is the explicit user pin and must stay strongest.)
+const STRONG_MARKERS: &[&str] = &[
+    ".git", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
+    "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml", ".stsx-root",
 ];
+
+/// Weak markers — only count as a project root when corroborated.
+/// `package.json` alone is NOT enough: aggregate/monorepo ROOT dirs commonly
+/// carry a lone `package.json` (e.g. a puppeteer/playwright config) with no
+/// real node project. Require `node_modules/` next to it (a real npm project
+/// has deps installed locally). This kills the F:\trae-cn style false root
+/// without breaking genuine Node projects.
+fn is_project_root(dir: &Path) -> bool {
+    for marker in STRONG_MARKERS {
+        if dir.join(marker).exists() {
+            return true;
+        }
+    }
+    if dir.join("package.json").exists() && dir.join("node_modules").is_dir() {
+        return true;
+    }
+    false
+}
+
+/// Cap on upward climb inside `detect_project_root` (same spirit as the
+/// depth≤8 guardrail in `escalate_to_workspace_root`). Without it, a search
+/// deep inside a non-project subtree could climb all the way to a drive root.
+const MAX_ROOT_CLIMB: usize = 8;
 
 pub fn detect_project_root(start: &Path) -> PathBuf {
     let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
@@ -87,13 +111,16 @@ pub fn detect_project_root(start: &Path) -> PathBuf {
     } else {
         canonical.clone()
     };
+    let mut climbed = 0;
     loop {
-        for marker in PROJECT_MARKERS {
-            if dir.join(marker).exists() {
-                // R4: a Cargo workspace member escalates to the workspace root
-                // (guardrailed: depth≤8, stops at .stsx-root, never $HOME or /).
-                return escalate_to_workspace_root(dir);
-            }
+        if is_project_root(&dir) {
+            // R4: a Cargo workspace member escalates to the workspace root
+            // (guardrailed: depth≤8, stops at .stsx-root, never $HOME or /).
+            return escalate_to_workspace_root(dir);
+        }
+        climbed += 1;
+        if climbed >= MAX_ROOT_CLIMB {
+            return canonical;
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent.to_path_buf(),
@@ -219,12 +246,86 @@ fn has_newer_files(dir: &Path, threshold: &std::time::SystemTime, depth: u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::INDEX_VERSION;
+    use super::{detect_project_root, is_project_root, INDEX_VERSION};
+    use std::fs;
 
     #[test]
     fn index_version_is_v3_for_cjk_rebuild() {
         // v2 indexes used SimpleTokenizer (CJK = 1 giant token) and must be
         // invalidated by the v3 bump; this test pins the constant.
         assert_eq!(INDEX_VERSION, "v3");
+    }
+
+    /// Aggregate-root regression (F:\trae-cn style): a lone `package.json`
+    /// with NO node_modules must NOT make the directory look like a project
+    /// root — otherwise every child-project search climbs to the aggregate
+    /// root and indexes 380k blocks.
+    #[test]
+    fn lone_package_json_is_not_a_project_root() {
+        // Unique base per test: cargo runs tests in parallel and shared
+        // `stsx-root-test-<pid>` dirs race — one test's remove_dir_all can
+        // delete another test's fixtures mid-run (macOS: canonicalize then
+        // fails → unwrap_or falls back to the un-resolved /var path).
+        let base = std::env::temp_dir().join(format!("stsx-root-test-{}-lone", std::process::id()));
+        let agg = base.join("aggregate"); // aggregate dir with lone package.json
+        fs::create_dir_all(&agg).ok();
+        fs::write(agg.join("package.json"), r#"{"dependencies":{"puppeteer":"^24"}}"#).ok();
+        assert!(!is_project_root(&agg), "lone package.json must not be a root");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// Real Node project: package.json + node_modules → project root.
+    #[test]
+    fn package_json_with_node_modules_is_a_project_root() {
+        let base = std::env::temp_dir().join(format!("stsx-root-test-{}-node", std::process::id()));
+        let proj = base.join("real-node-project");
+        fs::create_dir_all(proj.join("node_modules")).ok();
+        fs::write(proj.join("package.json"), "{}").ok();
+        assert!(is_project_root(&proj), "package.json + node_modules must be a root");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// Child project under an aggregate dir with lone package.json: detection
+    /// must land on the CHILD, not climb to the aggregate root.
+    #[test]
+    fn child_project_does_not_climb_to_lone_package_json_aggregate() {
+        let base = std::env::temp_dir().join(format!("stsx-root-test-{}-child", std::process::id()));
+        let agg = base.join("aggregate");
+        let child = agg.join("my-lib");
+        fs::create_dir_all(&child).ok();
+        fs::write(agg.join("package.json"), "{}").ok(); // lone, no node_modules
+        fs::write(child.join("Cargo.toml"), "[package]\nname=\"my-lib\"\n").ok(); // strong marker
+        let detected = detect_project_root(&child);
+        // canonicalize() may add the \\?\ long-path prefix on Windows; compare canonical forms.
+        let want = child.canonicalize().unwrap_or(child.clone());
+        assert_eq!(detected, want, "should land on child (Cargo.toml), got {detected:?}");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// Depth cap: deep non-project subtree must NOT climb to a drive root —
+    /// it should stop after MAX_ROOT_CLIMB and return the original path.
+    #[test]
+    fn deep_subtree_without_markers_returns_original() {
+        let base = std::env::temp_dir().join(format!("stsx-root-test-{}-deep", std::process::id()));
+        let deep = base
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("d")
+            .join("e")
+            .join("f")
+            .join("g")
+            .join("h")
+            .join("i")
+            .join("j");
+        fs::create_dir_all(&deep).ok();
+        let detected = detect_project_root(&deep);
+        let want = deep.canonicalize().unwrap_or(deep.clone());
+        assert_eq!(
+            detected,
+            want,
+            "deep markerless subtree should return original, got {detected:?}"
+        );
+        fs::remove_dir_all(&base).ok();
     }
 }

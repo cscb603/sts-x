@@ -517,10 +517,17 @@ impl SearchIndex {
 
     /// Search all files content (code + plain text)
     /// Uses live grep via `ignore` crate for non-indexed files.
-    pub fn search_all_files(&self, query: &str, config: &IndexConfig, top_k: usize) -> Result<Vec<SearchResult>> {
+    pub fn search_all_files(
+        &self,
+        query: &str,
+        config: &IndexConfig,
+        top_k: usize,
+        path_filter: Option<&str>,
+    ) -> Result<Vec<SearchResult>> {
         let start = std::time::Instant::now();
         let mut results = Vec::new();
         let query_lower = query.to_lowercase();
+        let pf = path_filter.map(|p| p.trim()).filter(|p| !p.is_empty());
 
         let walker = ignore::WalkBuilder::new(&config.project_root)
             .git_ignore(true)
@@ -555,6 +562,14 @@ impl SearchIndex {
             // Skip noise/backup paths
             if is_noise_path(&rel_str) {
                 continue;
+            }
+            // path_filter: same rule as search_text P0-3 — the --all live-grep
+            // path must not bypass it, otherwise --path-filter mixes in
+            // non-matching files.
+            if let Some(pf) = pf {
+                if !rel_str.contains(pf) {
+                    continue;
+                }
             }
 
             if rel_str.to_lowercase().contains(&query_lower) {
@@ -659,11 +674,13 @@ impl SearchIndex {
         terms: &[String],
         top_k: usize,
         skip_paths: &HashSet<String>,
+        path_filter: Option<&str>,
     ) -> Result<Vec<LocateMatch>> {
         let mut out: Vec<LocateMatch> = Vec::new();
         if terms.is_empty() || top_k == 0 {
             return Ok(out);
         }
+        let pf = path_filter.map(|p| p.trim()).filter(|p| !p.is_empty());
 
         let walker = ignore::WalkBuilder::new(&self.config.project_root)
             .git_ignore(true)
@@ -696,6 +713,15 @@ impl SearchIndex {
             let rel_str = rel_path.display().to_string();
             if skip_paths.contains(&rel_str) {
                 continue;
+            }
+            // path_filter: keep only files whose relative path contains the
+            // filter (same rule as search_text P0-3 — locate live-grep fallback
+            // must NOT bypass it, otherwise --path-filter mixes in non-matching
+            // files and corrupts the result set).
+            if let Some(pf) = pf {
+                if !rel_str.contains(pf) {
+                    continue;
+                }
             }
             // Skip excluded patterns
             if self.config.exclude_patterns.iter().any(|p| {
@@ -1146,6 +1172,41 @@ mod tests {
         // Filter to a non-matching path → empty
         let none = idx.search_text("helper", 10, Some("nonexistent.rs")).unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn live_fallback_respects_path_filter() {
+        // Regression for the locate live-grep fallback bypassing --path-filter:
+        // search_code_live must keep only files whose rel path contains the filter,
+        // even when BM25 under-delivers and the fallback kicks in.
+        let idx_path = "/tmp/stsx-live-path-filter-test";
+        std::fs::remove_dir_all(idx_path).ok();
+        let cfg = IndexConfig {
+            project_root: PathBuf::from("."),
+            index_path: PathBuf::from(idx_path),
+            ..Default::default()
+        };
+        let mut idx = SearchIndex::new(cfg, None).unwrap();
+        idx.index_blocks(vec![
+            test_block("src/server/mod.rs", "mcp_server", "pub struct McpServer { }", 1),
+            test_block("src/cli/mod.rs", "cli_run", "fn cli_run() { }", 1),
+        ]).unwrap();
+
+        let terms = vec!["mcp".to_string()];
+        let skip = std::collections::HashSet::new();
+
+        // With filter → only server/mod.rs survives
+        let filtered = idx.search_code_live(&terms, 5, &skip, Some("server")).unwrap();
+        assert!(!filtered.is_empty(), "filter=server should still find server/mod.rs");
+        assert!(
+            filtered.iter().all(|m| m.file.contains("server")),
+            "all live hits must contain the filter, got: {:?}",
+            filtered.iter().map(|m| m.file.clone()).collect::<Vec<_>>()
+        );
+
+        // Non-matching filter → empty (fallback must NOT widen the result set)
+        let none = idx.search_code_live(&terms, 5, &skip, Some("nonexistent.rs")).unwrap();
+        assert!(none.is_empty(), "non-matching filter must yield no live hits");
     }
 
     fn tokenize_text(text: &str) -> Vec<String> {

@@ -152,6 +152,7 @@ impl SearchEngine {
                 &terms,
                 budget - matches.len(),
                 &seen_paths,
+                query.path_filter.as_deref(),
             )?;
             for m in live.iter_mut() {
                 m.file = short_path(&m.file);
@@ -161,8 +162,9 @@ impl SearchEngine {
 
         let elapsed = start.elapsed().as_millis() as u64;
         // v5.1 (P0-2): zero-hit locate → rescue hint so the AI can self-recover.
+        // v5.1-3: build_hint returns Option (None on hits>0); called with 0 here.
         let hint = if matches.is_empty() {
-            Some(crate::types::format::build_hint(&query.query, 0, "locate"))
+            crate::types::format::build_hint(&query.query, 0, "locate")
         } else {
             None
         };
@@ -285,7 +287,12 @@ impl SearchEngine {
 
         // Step 2: Live grep non-code files
         let config = self.index.config();
-        let file_results = self.index.search_all_files(&query.query, config, query.top_k)?;
+        let file_results = self.index.search_all_files(
+            &query.query,
+            config,
+            query.top_k,
+            query.path_filter.as_deref(),
+        )?;
 
         // Step 3: Merge — code results first, then file results
         let mut merged = Vec::new();
@@ -339,10 +346,21 @@ impl SearchEngine {
 }
 
 /// Estimate token count from character count (fast budget, no model inference).
-/// Uses the same rule as CLI: (char_count + 1) / 2.
+/// v5.1-3: CJK chars weighted 1.5 (a Chinese char ≈ 1-1.5 tokens in mixed
+/// code+Chinese content; the old flat 0.5/char estimate was too optimistic and
+/// silently overshot the budget on Chinese projects). ASCII stays 0.5/char.
 fn estimate_tokens(text: &str) -> usize {
-    let chars = text.chars().count();
-    chars.div_ceil(2)
+    let mut cjk = 0usize;
+    let mut ascii = 0usize;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            cjk += 1;
+        }
+    }
+    // ASCII ≈ 2 chars/token, CJK ≈ 1.5 chars/token → (ascii+1)/2 + (cjk*2)/3
+    ascii.div_ceil(2) + (cjk * 2).div_ceil(3)
 }
 
 /// Truncate results to fit within `max_tokens` budget.

@@ -25,9 +25,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Ensure a project root is indexed (mirrors server::get_or_create_engine).
-fn ensure_engine(root: &Path) -> anyhow::Result<SearchEngine> {
+///
+/// `index_path_override` lets tests isolate their Tantivy index into a temp dir
+/// so parallel tests don't fight over the same IndexWriter lock (LockBusy).
+fn ensure_engine(root: &Path, index_path_override: Option<&Path>) -> anyhow::Result<SearchEngine> {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let index_path = cache::index_dir_for(&canonical);
+    let index_path = match index_path_override {
+        Some(p) => p.to_path_buf(),
+        None => cache::index_dir_for(&canonical),
+    };
     let config = IndexConfig {
         project_root: canonical.clone(),
         index_path: index_path.clone(),
@@ -62,7 +68,18 @@ struct McpEngine {
 impl McpEngine {
     fn for_path(root: &Path) -> anyhow::Result<Self> {
         let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let engine = ensure_engine(&canonical)?;
+        let engine = ensure_engine(&canonical, None)?;
+        Ok(Self {
+            root: canonical,
+            engine,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_path_with_index(root: &Path, index_path: &Path) -> anyhow::Result<Self> {
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        std::fs::create_dir_all(index_path).ok();
+        let engine = ensure_engine(&canonical, Some(index_path))?;
         Ok(Self {
             root: canonical,
             engine,
@@ -294,8 +311,10 @@ mod tests {
     #[test]
     fn engine_search_auto_routes_symbol_to_locate() {
         // 无 output_mode 时符号查询自动走 locate（与 CLI ai / HTTP server 一致）
+        // 用独立临时索引目录，避免并行测试争抢同一 Tantivy 写锁（LockBusy）
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut eng = McpEngine::for_path(root).expect("engine");
+        let idx = std::env::temp_dir().join(format!("stsx-mcp-test-{}", std::process::id()));
+        let mut eng = McpEngine::for_path_with_index(root, &idx).expect("engine");
         let args = serde_json::json!({"query": "McpServer", "top_k": 2});
         let out = eng.search(&args).expect("search");
         assert_eq!(out["mode"], "locate");
@@ -304,7 +323,8 @@ mod tests {
     #[test]
     fn engine_search_chinese_hint_on_zero_hits() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut eng = McpEngine::for_path(root).expect("engine");
+        let idx = std::env::temp_dir().join(format!("stsx-mcp-test-{}-cn", std::process::id()));
+        let mut eng = McpEngine::for_path_with_index(root, &idx).expect("engine");
         // 动态拼接避免源码含完整查询串（否则测试文件自身会被索引命中）
         let q = format!("zzqq_{}x9", "量子纠缠不存在");
         let args = serde_json::json!({"query": q, "output_mode": "locate"});
