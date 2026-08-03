@@ -1,0 +1,19 @@
+# STS-X — AI-Agent-First Code & File Search Engine
+
+> An AST-aware, BM25-powered search engine purpose-built for AI agents. Cuts the token cost of "grep + Read" by ~80% with locate/expand modes, symbol search, and native MCP. One 30MB zero-dependency binary for macOS/Windows/Linux.
+
+STS-X indexes code with AST-aware chunking so it returns meaningful blocks, not random line snippets. It speaks JSON natively and ships a stdio MCP server, letting LLM agents search your codebase without burning tokens on full-file reads. Single static binary, no runtime deps.
+
+## Documentation
+- [README](https://github.com/cscb603/sts-x): Install, modes, MCP setup
+- [Releases](https://github.com/cscb603/sts-x/releases): Cross-platform binaries
+
+## Key capabilities
+- [AST-aware BM25 search](https://github.com/cscb603/sts-x): Returns code blocks, not noise
+- [Symbol fast-path](https://github.com/cscb603/sts-x): Precise symbol/definition lookup
+- [Native MCP server](https://github.com/cscb603/sts-x): Plug into any MCP client
+- [Token savings ~80%](https://github.com/cscb603/sts-x): vs grep + Read workflows
+- [Zero-dep 30MB binary](https://github.com/cscb603/sts-x): macOS / Windows / Linux
+
+## Topics
+code search, file search, AST, BM25, MCP, LLM, developer tools, Rust, CLI, token savings, semantic search
