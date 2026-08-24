@@ -5,16 +5,16 @@
 <h1 align="center">STS-X</h1>
 <p align="center">
   <strong>为 AI Agent 而生的「代码 + 文件」统一搜索引擎</strong><br>
-  AST感知切块 · BM25极速全文搜索 · MCP原生协议 · 27MB零依赖<br>
+  AST感知切块 · BM25极速全文搜索 · 0命中自动重试 · 中文语义检索 · MCP原生协议<br>
   <em>二合一：代码搜索（locate 行级 / expand 整块）+ 任意目录零索引文件搜索</em><br>
   <em>深层任务省约 80% token（约为 grep+Read 流程的 1/5）</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/cscb603/sts-x/releases">
-    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.2.0">
+    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.3.1">
   </a>
-  <img src="https://img.shields.io/badge/大小-27MB-10B981" alt="大小">
+  <img src="https://img.shields.io/badge/大小-6~30MB-10B981" alt="大小">
   <img src="https://img.shields.io/badge/定位-为_AI_而生-4F46E5" alt="定位">
   <img src="https://img.shields.io/badge/AI场景-省~80%25_token-10B981" alt="省token">
   <img src="https://img.shields.io/badge/延迟-0–2ms-F59E0B" alt="延迟">
@@ -51,7 +51,7 @@ STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代
 | AI Agent 搜索代码 | 返回纯文本，AI 需要自己解析 | 返回结构化 JSON，字段清晰，自带 `_ai_instructions` 使用指南 |
 | 需要完整函数上下文 | grep 返回零散行，看不懂 | AST 感知切块，按函数/类/方法返回完整代码块 |
 | 集成到 AI 工作流 | 需要写脚本解析输出 | 内置 MCP HTTP 服务，GET /tools 自动发现，POST /search 即用 |
-| 跨平台部署 | 需要安装运行时（Python/Node） | 27MB 单二进制，零依赖，下载即用 |
+| 跨平台部署 | 需要安装运行时（Python/Node） | 6-30MB 单二进制，零依赖，下载即用 |
 | 索引管理 | 手动创建、手动更新 | 自动索引、自动缓存、文件变更自动重建 |
 | Windows 中文路径 | 乱码/编码问题 | 内建 POSIX 路径归一化，原生兼容 |
 | 任意目录找文件/内容 | 要先 `cd` 进项目、建索引 | `file` 子命令零索引：文件名+内容，rg 优先（无索引目录如 ~/Downloads 直接搜） |
@@ -62,7 +62,7 @@ STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代
 
 ### 一分钟上手
 
-**📥 下载（v3.2.0 / v5.1 毕业版）**
+**📥 下载（v3.3.1 最新）**
 
 | 平台 | 国内高速（蓝奏云） | GitHub Releases（备用） |
 |---|---|---|
@@ -89,6 +89,9 @@ sts-x search "select_best_cfg" --locate
 
 # 6. 人类友好模式
 sts-x search "token verification" -H
+
+# 7. 中文 NL → 英文代码语义直达（v3.3.1，语义版；0 命中会自动重试英文词/符号/文件兜底）
+STX_SEMANTIC=1 sts-x ai "缓存目录在哪里" -p /your-project
 ```
 
 ```powershell
@@ -284,8 +287,8 @@ sts-x search "password|secret_key|api_key"
 
 | 项目 | 详情 |
 |------|------|
-| **版本** | v3.2.0（v5.1 毕业版） |
-| **二进制大小** | macOS 27MB / Windows 28MB（strip 后） |
+| **版本** | v3.3.1（0 命中自动重试 + 中文语义检索） |
+| **二进制大小** | macOS 默认 6MB / 语义版 30MB；Windows 默认 6MB / 语义版 28MB |
 | **搜索延迟** | 0–2ms（千级文件） |
 | **索引引擎** | Tantivy BM25（自定义 code 分词器） |
 | **AST 解析** | tree-sitter（9 种语言） |
@@ -297,7 +300,7 @@ sts-x search "password|secret_key|api_key"
 | **文件搜索** | `file` 子命令 / `/file` 工具，零索引，rg 优先（任意目录） |
 | **响应字段** | score · path · lines · highlight_lines · kind · name · signature · language · code · _ai_instructions |
 | **索引存储** | 系统缓存目录（不污染项目，自动重建） |
-| **可选增强** | ONNX embedding + BGE Reranker（`--features semantic`） |
+| **可选增强** | 中文语义检索 `STX_SEMANTIC=1`（bge-small-zh-v1.5，中文 NL → 英文代码语义直达；onnxruntime 自动探测，零配置）|
 | **平台** | macOS ARM64 · Windows x86_64（静态 CRT）· Linux x86_64（源码构建） |
 | **许可证** | MIT |
 

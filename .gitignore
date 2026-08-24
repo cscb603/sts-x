@@ -27,3 +27,13 @@ plans/WHITEPAPER-*
 # python caches
 scripts/__pycache__/
 __pycache__/
+
+# ONNX embedding models（24MB+，不进 git；STX_SEMANTIC 按需下载/放置）
+/models/
+*.onnx
+*.dylib
+*.dll
+
+# 打包中间产物（win-dll nupkg 133MB 等）
+/_scratch/
+/dist/

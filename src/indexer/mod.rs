@@ -12,20 +12,20 @@
  * For larger scale, a dedicated vector DB can be swapped in.
  */
 
-use crate::types::{CodeBlock, IndexConfig, LocateMatch, SearchResult};
-use std::collections::HashSet;
 use crate::embed::EmbeddingModel;
+use crate::types::{CodeBlock, IndexConfig, LocateMatch, SearchResult};
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use std::collections::HashSet;
 use tantivy::{
     doc,
-    query::{TermQuery, BooleanQuery, Occur, Query},
+    query::{BooleanQuery, Occur, Query, TermQuery},
     schema::*,
-    tokenizer::{TextAnalyzer, SimpleTokenizer, LowerCaser, RemoveLongFilter, Token, TokenStream, Tokenizer},
-    Term,
-    IndexWriter, IndexReader, Index, ReloadPolicy,
-    TantivyDocument,
+    tokenizer::{
+        LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
+    },
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
 };
 
 /// A fully indexed code block with its embedding vector
@@ -61,6 +61,10 @@ const FIELD_LANGUAGE: &str = "language";
 const FIELD_KIND: &str = "kind";
 const FIELD_START_LINE: &str = "start_line";
 const FIELD_END_LINE: &str = "end_line";
+/// P0-2: embedding 向量以 little-endian f32 字节流持久化进 tantivy doc
+/// （STORED bytes）。索引时写入，加载时读回 → 查询进程也能做向量召回。
+/// 旧索引（无此字段）打开时 get_field 失败 → 优雅降级到 BM25 + 重试链。
+const FIELD_EMBEDDING: &str = "embedding";
 
 /// File extensions treated as code (AST-indexed)
 const CODE_EXTENSIONS: &[&str] = &[
@@ -70,20 +74,24 @@ const CODE_EXTENSIONS: &[&str] = &[
 
 /// Binary/text extensions to skip entirely (don't even index path)
 const SKIP_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns",
-    "mp3", "mp4", "avi", "mov", "wav", "flac",
-    "zip", "tar", "gz", "bz2", "7z", "rar",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "ttf", "otf", "woff", "woff2", "eot",
-    "o", "so", "dylib", "dll", "exe", "dmg", "app",
-    "wasm", "rlib", "rmeta",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns", "mp3", "mp4", "avi", "mov", "wav", "flac",
+    "zip", "tar", "gz", "bz2", "7z", "rar", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "ttf", "otf", "woff", "woff2", "eot", "o", "so", "dylib", "dll", "exe", "dmg", "app", "wasm",
+    "rlib", "rmeta",
 ];
 
 /// Noise directory/file patterns — paths containing any of these are skipped.
 /// Used to filter out backup copies, old versions, and other junk files.
 const NOISE_PATTERNS: &[&str] = &[
-    "_backup", "_original", "_old", "_copy", "复制", "副本",
-    ".bak", ".swp", ".tmp",
+    "_backup",
+    "_original",
+    "_old",
+    "_copy",
+    "复制",
+    "副本",
+    ".bak",
+    ".swp",
+    ".tmp",
 ];
 
 /// Check if a relative path string contains any noise pattern.
@@ -268,11 +276,13 @@ impl SearchIndex {
 
         let mut schema_builder = Schema::builder();
         schema_builder.add_text_field(FIELD_PATH, STRING | STORED);
-        let cjk_options = TextOptions::default().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("cjk")
-                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-        ).set_stored();
+        let cjk_options = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("cjk")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            )
+            .set_stored();
         schema_builder.add_text_field(FIELD_NAME, cjk_options.clone());
         schema_builder.add_text_field(FIELD_SIGNATURE, cjk_options.clone());
         schema_builder.add_text_field(FIELD_CODE, cjk_options.clone());
@@ -281,14 +291,16 @@ impl SearchIndex {
         schema_builder.add_text_field(FIELD_KIND, STRING | STORED);
         schema_builder.add_u64_field(FIELD_START_LINE, STORED);
         schema_builder.add_u64_field(FIELD_END_LINE, STORED);
+        // P0-2: embedding bytes（STORED，不进倒排）。仅新索引有该字段。
+        schema_builder.add_bytes_field(FIELD_EMBEDDING, STORED);
         let schema = schema_builder.build();
 
         let index_path = config.index_path.join("tantivy");
         std::fs::create_dir_all(&index_path).ok();
 
         let text_index = if index_path.join("meta.json").exists() {
-            let idx = Index::open_in_dir(&index_path)
-                .context("Failed to open existing tantivy index")?;
+            let idx =
+                Index::open_in_dir(&index_path).context("Failed to open existing tantivy index")?;
             idx.tokenizers().register("code", code_tokenizer);
             idx.tokenizers().register("cjk", cjk_tokenizer);
             idx
@@ -301,65 +313,65 @@ impl SearchIndex {
         };
 
         let text_reader = text_index
-        .reader_builder()
-        .reload_policy(ReloadPolicy::OnCommitWithDelay)
-        .try_into()?;
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
 
-    let mut index = Self {
-        text_index,
-        text_reader,
-        schema,
-        vector_store: Vec::new(),
-        doc_id_to_vector: HashMap::new(),
-        embed_model,
-        config,
-    };
+        let mut index = Self {
+            text_index,
+            text_reader,
+            schema,
+            vector_store: Vec::new(),
+            doc_id_to_vector: HashMap::new(),
+            embed_model,
+            config,
+        };
 
-    // If loading an existing index, populate vector_store from stored docs
-    if index_path.join("meta.json").exists() {
-        index.load_vector_store_from_tantivy()?;
+        // If loading an existing index, populate vector_store from stored docs
+        if index_path.join("meta.json").exists() {
+            index.load_vector_store_from_tantivy()?;
+        }
+
+        Ok(index)
     }
-
-    Ok(index)
-}
 
     /// Index a batch of code blocks
     pub fn index_blocks(&mut self, blocks: Vec<CodeBlock>) -> Result<()> {
         let mut writer: IndexWriter<TantivyDocument> = self.text_index.writer(50_000_000)?;
 
-        for block in &blocks {
-            // Add to tantivy
-            let doc = self.create_tantivy_doc(block);
+        // P0-2: 先统一生成 embedding（若有模型），写 doc 时一并持久化，
+        // 保证「查询进程重新加载索引」时向量召回仍可用（embedding 不落盘
+        // 则每次查询都是空向量，语义检索永远失效）。
+        let embeddings: Vec<Vec<f32>> = if let Some(ref mut model) = self.embed_model {
+            let texts: Vec<String> = blocks
+                .iter()
+                .map(|b| format!("{}\n{}", b.signature, b.code))
+                .collect();
+            match model.encode_batch(&texts) {
+                Ok(es) => es,
+                Err(e) => {
+                    tracing::warn!(
+                        "Embedding generation failed: {e:#}; indexing without embeddings"
+                    );
+                    vec![Vec::new(); blocks.len()]
+                }
+            }
+        } else {
+            vec![Vec::new(); blocks.len()]
+        };
+
+        for (i, block) in blocks.iter().enumerate() {
+            let doc = self.create_tantivy_doc(block, embeddings.get(i).map(|v| v.as_slice()));
             writer.add_document(doc)?;
         }
 
         writer.commit()?;
         self.text_reader.reload()?;
 
-        // Generate embeddings and add to vector store
-        if let Some(ref mut model) = self.embed_model {
-            let texts: Vec<String> = blocks
-                .iter()
-                .map(|b| format!("{}\n{}", b.signature, b.code))
-                .collect();
-
-            let embeddings = model.encode_batch(&texts)?;
-
-            for (i, (block, embedding)) in blocks.into_iter().zip(embeddings).enumerate() {
-                let vidx = self.vector_store.len();
-                self.vector_store.push(IndexedBlock { block, embedding });
-                self.doc_id_to_vector.insert(i as u32, vidx);
-            }
-        } else {
-            for block in blocks {
-                let vidx = self.vector_store.len();
-                self.vector_store.push(IndexedBlock {
-                    block,
-                    embedding: Vec::new(),
-                });
-                // Map dummy doc_id
-                self.doc_id_to_vector.insert(vidx as u32, vidx);
-            }
+        for (block, embedding) in blocks.into_iter().zip(embeddings) {
+            let vidx = self.vector_store.len();
+            self.vector_store.push(IndexedBlock { block, embedding });
+            self.doc_id_to_vector.insert(vidx as u32, vidx);
         }
 
         Ok(())
@@ -395,8 +407,10 @@ impl SearchIndex {
             // Skip excluded patterns
             if config.exclude_patterns.iter().any(|p| {
                 let pattern = p.trim_end_matches("/*");
-                rel_str.starts_with(pattern) || rel_str.contains("/target/")
-                    || rel_str.contains("node_modules") || rel_str.contains(".git")
+                rel_str.starts_with(pattern)
+                    || rel_str.contains("/target/")
+                    || rel_str.contains("node_modules")
+                    || rel_str.contains(".git")
             }) {
                 continue;
             }
@@ -416,7 +430,8 @@ impl SearchIndex {
                 continue;
             }
 
-            let name = path.file_stem()
+            let name = path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
 
@@ -443,7 +458,11 @@ impl SearchIndex {
 
     /// Search file names only (live walk, substring match)
     /// Fast enough for any project size, always up-to-date.
-    pub fn search_filename_live(query: &str, config: &IndexConfig, top_k: usize) -> Result<Vec<SearchResult>> {
+    pub fn search_filename_live(
+        query: &str,
+        config: &IndexConfig,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>> {
         let start = std::time::Instant::now();
         let mut results = Vec::new();
         let query_lower = query.to_lowercase();
@@ -471,8 +490,10 @@ impl SearchIndex {
             // Skip excluded patterns
             if config.exclude_patterns.iter().any(|p| {
                 let pattern = p.trim_end_matches("/*");
-                rel_str.starts_with(pattern) || rel_str.contains("/target/")
-                    || rel_str.contains("node_modules") || rel_str.contains(".git")
+                rel_str.starts_with(pattern)
+                    || rel_str.contains("/target/")
+                    || rel_str.contains("node_modules")
+                    || rel_str.contains(".git")
             }) {
                 continue;
             }
@@ -484,7 +505,8 @@ impl SearchIndex {
 
             // Substring match on relative path
             if rel_str.to_lowercase().contains(&query_lower) {
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 results.push(SearchResult {
@@ -511,7 +533,11 @@ impl SearchIndex {
             }
         }
 
-        tracing::info!("search_filename_live: {} results in {:?}", results.len(), start.elapsed());
+        tracing::info!(
+            "search_filename_live: {} results in {:?}",
+            results.len(),
+            start.elapsed()
+        );
         Ok(results)
     }
 
@@ -552,7 +578,8 @@ impl SearchIndex {
 
             let rel_path = pathdiff::diff_paths(path, &config.project_root)
                 .unwrap_or_else(|| path.to_path_buf());
-            let name = path.file_stem()
+            let name = path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
 
@@ -630,7 +657,10 @@ impl SearchIndex {
                 }
             };
 
-            if let Some(line_idx) = content.lines().position(|l: &str| l.to_lowercase().contains(&query_lower)) {
+            if let Some(line_idx) = content
+                .lines()
+                .position(|l: &str| l.to_lowercase().contains(&query_lower))
+            {
                 results.push(SearchResult {
                     score: 0.9,
                     block: CodeBlock {
@@ -655,7 +685,11 @@ impl SearchIndex {
             }
         }
 
-        tracing::info!("search_all_files: {} results in {:?}", results.len(), start.elapsed());
+        tracing::info!(
+            "search_all_files: {} results in {:?}",
+            results.len(),
+            start.elapsed()
+        );
         Ok(results)
     }
 
@@ -819,17 +853,20 @@ impl SearchIndex {
             // Tantivy 0.22 lacks native min_should_match, so Must/Should composition
             // is the only clean way to enforce multi-term precision.
             let min_match = terms.len() - 1;
-            let per_term: Vec<Box<dyn Query>> = terms.iter().map(|term| {
-                let mut cls: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-                for &field in &fields {
-                    let tq = TermQuery::new(
-                        Term::from_field_text(field, term),
-                        IndexRecordOption::WithFreqsAndPositions,
-                    );
-                    cls.push((Occur::Should, Box::new(tq)));
-                }
-                Box::new(BooleanQuery::new(cls)) as Box<dyn Query>
-            }).collect();
+            let per_term: Vec<Box<dyn Query>> = terms
+                .iter()
+                .map(|term| {
+                    let mut cls: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                    for &field in &fields {
+                        let tq = TermQuery::new(
+                            Term::from_field_text(field, term),
+                            IndexRecordOption::WithFreqsAndPositions,
+                        );
+                        cls.push((Occur::Should, Box::new(tq)));
+                    }
+                    Box::new(BooleanQuery::new(cls)) as Box<dyn Query>
+                })
+                .collect();
 
             let mut outer_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for (i, q) in per_term.into_iter().enumerate() {
@@ -860,8 +897,10 @@ impl SearchIndex {
             Box::new(BooleanQuery::new(field_clauses))
         };
 
-        let top_docs = searcher
-            .search(&tantivy_query, &tantivy::collector::TopDocs::with_limit(top_k * 2))?;
+        let top_docs = searcher.search(
+            &tantivy_query,
+            &tantivy::collector::TopDocs::with_limit(top_k * 2),
+        )?;
 
         let mut results = Vec::new();
         for (score, doc_addr) in top_docs {
@@ -914,9 +953,7 @@ impl SearchIndex {
         if let Some(pf) = path_filter {
             let pf = pf.trim();
             if !pf.is_empty() {
-                results.retain(|(_, ib)| {
-                    ib.block.path.display().to_string().contains(pf)
-                });
+                results.retain(|(_, ib)| ib.block.path.display().to_string().contains(pf));
             }
         }
 
@@ -925,7 +962,11 @@ impl SearchIndex {
     }
 
     /// Search via vector similarity
-    pub fn search_vector(&self, query_embedding: &[f32], top_k: usize) -> Result<Vec<(f32, &IndexedBlock)>> {
+    pub fn search_vector(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(f32, &IndexedBlock)>> {
         let mut scored: Vec<(f32, &IndexedBlock)> = self
             .vector_store
             .iter()
@@ -954,9 +995,11 @@ impl SearchIndex {
 
         // BM25 RRF contribution
         for (rank, (_score, entry)) in text_results.iter().enumerate() {
-            let idx = self.vector_store.iter().position(|e| {
-                std::ptr::eq(e, *entry)
-            }).unwrap_or(usize::MAX);
+            let idx = self
+                .vector_store
+                .iter()
+                .position(|e| std::ptr::eq(e, *entry))
+                .unwrap_or(usize::MAX);
             if idx != usize::MAX {
                 *candidates.entry(idx).or_insert(0.0) += 1.0 / (60.0 + rank as f32);
             }
@@ -966,9 +1009,11 @@ impl SearchIndex {
         if let Some(emb) = query_embedding {
             let vector_results = self.search_vector(emb, top_k * 2)?;
             for (rank, (_score, entry)) in vector_results.iter().enumerate() {
-                let idx = self.vector_store.iter().position(|e| {
-                    std::ptr::eq(e, *entry)
-                }).unwrap_or(usize::MAX);
+                let idx = self
+                    .vector_store
+                    .iter()
+                    .position(|e| std::ptr::eq(e, *entry))
+                    .unwrap_or(usize::MAX);
                 if idx != usize::MAX {
                     *candidates.entry(idx).or_insert(0.0) += 1.0 / (60.0 + rank as f32);
                 }
@@ -1001,6 +1046,12 @@ impl SearchIndex {
         self.vector_store.len()
     }
 
+    /// P0-2: 索引里是否存在已持久化的 embedding（semantic 检索可用性探测）。
+    /// 若为空 → 该索引曾以「无模型/模型不可用」构建，语义检索需强制重建。
+    pub fn has_embeddings(&self) -> bool {
+        self.vector_store.iter().any(|b| !b.embedding.is_empty())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.vector_store.is_empty()
     }
@@ -1017,6 +1068,8 @@ impl SearchIndex {
         let kind_field = self.schema.get_field(FIELD_KIND)?;
         let sl_field = self.schema.get_field(FIELD_START_LINE)?;
         let el_field = self.schema.get_field(FIELD_END_LINE)?;
+        // P0-2: 旧索引无 embedding 字段 → 优雅降级（该字段全空 → 向量召回自然为空）
+        let emb_field = self.schema.get_field(FIELD_EMBEDDING).ok();
 
         // Scan all documents in the index
         let num_docs = searcher.num_docs() as usize;
@@ -1076,7 +1129,8 @@ impl SearchIndex {
             let block = CodeBlock {
                 path: rel_path,
                 abs_path,
-                kind: serde_json::from_str(&format!("\"{}\"", kind_str.to_lowercase())).unwrap_or(crate::types::BlockKind::Block),
+                kind: serde_json::from_str(&format!("\"{}\"", kind_str.to_lowercase()))
+                    .unwrap_or(crate::types::BlockKind::Block),
                 name: name_str,
                 signature: sig_str,
                 doc_comment: doc_str,
@@ -1088,17 +1142,20 @@ impl SearchIndex {
             };
 
             let vidx = self.vector_store.len();
-            self.vector_store.push(IndexedBlock {
-                block,
-                embedding: Vec::new(),
-            });
+            // P0-2: 读回持久化的 embedding（le f32 字节流 → Vec<f32>）
+            let embedding = emb_field
+                .and_then(|f| retrieved_doc.get_first(f))
+                .and_then(|v| v.as_bytes())
+                .map(decode_f32s)
+                .unwrap_or_default();
+            self.vector_store.push(IndexedBlock { block, embedding });
             self.doc_id_to_vector.insert(vidx as u32, vidx);
         }
 
         Ok(())
     }
 
-    fn create_tantivy_doc(&self, block: &CodeBlock) -> TantivyDocument {
+    fn create_tantivy_doc(&self, block: &CodeBlock, embedding: Option<&[f32]>) -> TantivyDocument {
         let path_field = self.schema.get_field(FIELD_PATH).unwrap();
         let name_field = self.schema.get_field(FIELD_NAME).unwrap();
         let sig_field = self.schema.get_field(FIELD_SIGNATURE).unwrap();
@@ -1109,7 +1166,7 @@ impl SearchIndex {
         let sl_field = self.schema.get_field(FIELD_START_LINE).unwrap();
         let el_field = self.schema.get_field(FIELD_END_LINE).unwrap();
 
-        doc!(
+        let mut doc = doc!(
             path_field => block.path.display().to_string(),
             name_field => block.name.clone(),
             sig_field => block.signature.clone(),
@@ -1119,8 +1176,32 @@ impl SearchIndex {
             kind_field => format!("{:?}", block.kind),
             sl_field => block.start_line as u64,
             el_field => block.end_line as u64,
-        )
+        );
+        // P0-2: 持久化 embedding（非空时写入 bytes 字段）
+        if let (Ok(emb_field), Some(emb)) = (self.schema.get_field(FIELD_EMBEDDING), embedding) {
+            if !emb.is_empty() {
+                doc.add_bytes(emb_field, encode_f32s(emb));
+            }
+        }
+        doc
     }
+}
+
+/// le f32 字节流 → Vec<f32>
+fn decode_f32s(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Vec<f32> → le f32 字节流
+fn encode_f32s(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1156,9 +1237,20 @@ mod tests {
         };
         let mut idx = SearchIndex::new(cfg, None).unwrap();
         idx.index_blocks(vec![
-            test_block("src/cache.rs", "cache_helper", "fn cache_helper() { let x = 42; }", 1),
-            test_block("src/search.rs", "search_helper", "fn search_helper() { let y = 43; }", 1),
-        ]).unwrap();
+            test_block(
+                "src/cache.rs",
+                "cache_helper",
+                "fn cache_helper() { let x = 42; }",
+                1,
+            ),
+            test_block(
+                "src/search.rs",
+                "search_helper",
+                "fn search_helper() { let y = 43; }",
+                1,
+            ),
+        ])
+        .unwrap();
 
         // No filter → both blocks contain `helper`; query hits both
         let both = idx.search_text("helper", 10, None).unwrap();
@@ -1167,10 +1259,18 @@ mod tests {
         // Filter to cache.rs → only that block
         let cached = idx.search_text("helper", 10, Some("cache.rs")).unwrap();
         assert_eq!(cached.len(), 1);
-        assert!(cached[0].1.block.path.display().to_string().contains("cache.rs"));
+        assert!(cached[0]
+            .1
+            .block
+            .path
+            .display()
+            .to_string()
+            .contains("cache.rs"));
 
         // Filter to a non-matching path → empty
-        let none = idx.search_text("helper", 10, Some("nonexistent.rs")).unwrap();
+        let none = idx
+            .search_text("helper", 10, Some("nonexistent.rs"))
+            .unwrap();
         assert!(none.is_empty());
     }
 
@@ -1188,16 +1288,27 @@ mod tests {
         };
         let mut idx = SearchIndex::new(cfg, None).unwrap();
         idx.index_blocks(vec![
-            test_block("src/server/mod.rs", "mcp_server", "pub struct McpServer { }", 1),
+            test_block(
+                "src/server/mod.rs",
+                "mcp_server",
+                "pub struct McpServer { }",
+                1,
+            ),
             test_block("src/cli/mod.rs", "cli_run", "fn cli_run() { }", 1),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let terms = vec!["mcp".to_string()];
         let skip = std::collections::HashSet::new();
 
         // With filter → only server/mod.rs survives
-        let filtered = idx.search_code_live(&terms, 5, &skip, Some("server")).unwrap();
-        assert!(!filtered.is_empty(), "filter=server should still find server/mod.rs");
+        let filtered = idx
+            .search_code_live(&terms, 5, &skip, Some("server"))
+            .unwrap();
+        assert!(
+            !filtered.is_empty(),
+            "filter=server should still find server/mod.rs"
+        );
         assert!(
             filtered.iter().all(|m| m.file.contains("server")),
             "all live hits must contain the filter, got: {:?}",
@@ -1205,8 +1316,13 @@ mod tests {
         );
 
         // Non-matching filter → empty (fallback must NOT widen the result set)
-        let none = idx.search_code_live(&terms, 5, &skip, Some("nonexistent.rs")).unwrap();
-        assert!(none.is_empty(), "non-matching filter must yield no live hits");
+        let none = idx
+            .search_code_live(&terms, 5, &skip, Some("nonexistent.rs"))
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "non-matching filter must yield no live hits"
+        );
     }
 
     fn tokenize_text(text: &str) -> Vec<String> {
@@ -1255,7 +1371,6 @@ mod tests {
         assert_eq!(cjk_bigram_terms("文件 搜索"), vec!["文件", "搜索"]);
     }
 }
-
 
 #[cfg(test)]
 mod tests_extra {

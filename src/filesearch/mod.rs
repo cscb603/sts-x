@@ -170,10 +170,7 @@ fn search_files_walk(
         // content match (non-code/text only — skip binaries by read_to_string)
         if !name_only {
             if let Ok(content) = std::fs::read_to_string(path) {
-                if let Some(idx) = content
-                    .lines()
-                    .position(|l| l.to_lowercase().contains(&ql))
-                {
+                if let Some(idx) = content.lines().position(|l| l.to_lowercase().contains(&ql)) {
                     out.push(build_match(
                         &rel_str,
                         "content",

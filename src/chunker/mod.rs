@@ -12,7 +12,7 @@ use crate::types::{BlockKind, CodeBlock};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::path::Path;
-use tree_sitter::{Parser, Language};
+use tree_sitter::{Language, Parser};
 
 /// Language configuration mapping
 fn get_language(lang: &str) -> Option<Language> {
@@ -65,9 +65,9 @@ impl Chunker {
         for lang in languages {
             if let Some(language) = get_language(lang) {
                 let mut parser = Parser::new();
-                parser
-                    .set_language(&language)
-                    .with_context(|| format!("Failed to set tree-sitter parser for language: {}", lang))?;
+                parser.set_language(&language).with_context(|| {
+                    format!("Failed to set tree-sitter parser for language: {}", lang)
+                })?;
                 parsers.push((lang.clone(), parser));
             } else {
                 tracing::warn!("Unsupported language: {}, skipping", lang);
@@ -77,7 +77,11 @@ impl Chunker {
     }
 
     /// Walk a project directory and extract all code blocks
-    pub fn index_project(&mut self, root: &Path, config: &crate::types::IndexConfig) -> Result<Vec<CodeBlock>> {
+    pub fn index_project(
+        &mut self,
+        root: &Path,
+        config: &crate::types::IndexConfig,
+    ) -> Result<Vec<CodeBlock>> {
         let mut all_blocks = Vec::new();
 
         let walker = WalkBuilder::new(root)
@@ -106,7 +110,17 @@ impl Chunker {
             }
 
             // Skip noise/backup paths
-            let noise_patterns = ["_backup", "_original", "_old", "_copy", "复制", "副本", ".bak", ".swp", ".tmp"];
+            let noise_patterns = [
+                "_backup",
+                "_original",
+                "_old",
+                "_copy",
+                "复制",
+                "副本",
+                ".bak",
+                ".swp",
+                ".tmp",
+            ];
             if noise_patterns.iter().any(|p| rel_str.contains(p)) {
                 continue;
             }
@@ -159,14 +173,7 @@ impl Chunker {
 
         let mut blocks = Vec::new();
 
-        self.collect_blocks_recursive(
-            cursor,
-            source,
-            &abs_path,
-            &path,
-            language,
-            &mut blocks,
-        );
+        self.collect_blocks_recursive(cursor, source, &abs_path, &path, language, &mut blocks);
 
         // Extract imports from file-level nodes
         let imports = extract_imports(source, language, &root_node);
@@ -217,15 +224,41 @@ impl Chunker {
         blocks: &mut Vec<CodeBlock>,
     ) {
         let node_types: &[&str] = match language {
-            "rust" => &["function_item", "struct_item", "enum_item",
-                         "trait_item", "impl_item", "type_item", "macro_definition"],
-            "python" => &["function_definition", "class_definition", "async_function_definition"],
-            "javascript" | "typescript" => &["function_declaration", "class_declaration",
-                                               "method_definition", "arrow_function", "export_statement"],
-            "go" => &["function_declaration", "method_declaration", "type_declaration",
-                        "type_spec", "struct_type"],
-            "java" => &["method_declaration", "class_declaration", "interface_declaration",
-                          "enum_declaration", "constructor_declaration"],
+            "rust" => &[
+                "function_item",
+                "struct_item",
+                "enum_item",
+                "trait_item",
+                "impl_item",
+                "type_item",
+                "macro_definition",
+            ],
+            "python" => &[
+                "function_definition",
+                "class_definition",
+                "async_function_definition",
+            ],
+            "javascript" | "typescript" => &[
+                "function_declaration",
+                "class_declaration",
+                "method_definition",
+                "arrow_function",
+                "export_statement",
+            ],
+            "go" => &[
+                "function_declaration",
+                "method_declaration",
+                "type_declaration",
+                "type_spec",
+                "struct_type",
+            ],
+            "java" => &[
+                "method_declaration",
+                "class_declaration",
+                "interface_declaration",
+                "enum_declaration",
+                "constructor_declaration",
+            ],
             _ => &[],
         };
 
@@ -237,15 +270,11 @@ impl Chunker {
             let node = cursor.node();
             let kind = node.kind();
             if node_types.contains(&kind) {
-                collect_single_block(
-                    node, source, abs_path, path, language, blocks,
-                );
+                collect_single_block(node, source, abs_path, path, language, blocks);
             }
 
             // Recurse into this node's children before the next sibling.
-            self.collect_blocks_recursive(
-                cursor, source, abs_path, path, language, blocks,
-            );
+            self.collect_blocks_recursive(cursor, source, abs_path, path, language, blocks);
 
             if !cursor.goto_next_sibling() {
                 break;
@@ -287,7 +316,11 @@ fn collect_single_block(
 
     tracing::debug!(
         "Found block: {} {} at {}:{}-{}",
-        block_kind_str(&block_kind), name, path.display(), start_line, end_line,
+        block_kind_str(&block_kind),
+        name,
+        path.display(),
+        start_line,
+        end_line,
     );
 
     blocks.push(CodeBlock {
@@ -307,9 +340,10 @@ fn collect_single_block(
 
 fn map_kind(kind: &str, _language: &str) -> BlockKind {
     match kind {
-        "function_item" | "function_definition" | "function_declaration" | "async_function_definition" => {
-            BlockKind::Function
-        }
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "async_function_definition" => BlockKind::Function,
         "class_definition" | "class_declaration" => BlockKind::Class,
         "struct_item" | "struct_type" | "type_spec" => BlockKind::Struct,
         "enum_item" | "enum_declaration" => BlockKind::Enum,
@@ -352,7 +386,11 @@ fn extract_doc_comment(source: &str, node: tree_sitter::Node, language: &str) ->
         let line = lines[i].trim();
         match language {
             "rust" if line.starts_with("///") || line.starts_with("//!") => {
-                doc_lines.push(line.trim_start_matches("///").trim_start_matches("//!").trim());
+                doc_lines.push(
+                    line.trim_start_matches("///")
+                        .trim_start_matches("//!")
+                        .trim(),
+                );
             }
             "python" if line.starts_with("\"\"\"") || line.starts_with("#") => {
                 doc_lines.push(line.trim_start_matches('#').trim());
@@ -360,7 +398,9 @@ fn extract_doc_comment(source: &str, node: tree_sitter::Node, language: &str) ->
                     break;
                 }
             }
-            "javascript" | "typescript" | "java" if line.starts_with("/**") || line.starts_with("//") => {
+            "javascript" | "typescript" | "java"
+                if line.starts_with("/**") || line.starts_with("//") =>
+            {
                 doc_lines.push(
                     line.trim_start_matches("/**")
                         .trim_start_matches("//")
@@ -410,5 +450,3 @@ fn extract_imports(source: &str, language: &str, root_node: &tree_sitter::Node) 
 
     imports
 }
-
-

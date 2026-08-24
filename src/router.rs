@@ -73,15 +73,17 @@ fn is_symbol_like(query: &str) -> bool {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
         _ => return false, // CJK / digit / punctuation start → NL
     }
-    if !q.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':') {
+    if !q
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    {
         return false; // any non-identifier char (incl. CJK) → NL
     }
 
     // Plain single lowercase word (no '_', no "::", no inner uppercase) is
     // ambiguous English → treat as natural language.
-    let has_code_shape = q.contains('_')
-        || q.contains("::")
-        || q.chars().any(|c| c.is_ascii_uppercase());
+    let has_code_shape =
+        q.contains('_') || q.contains("::") || q.chars().any(|c| c.is_ascii_uppercase());
     has_code_shape
 }
 
@@ -92,7 +94,13 @@ mod tests {
 
     #[test]
     fn symbols_route_to_locate() {
-        for q in ["Cli", "run_search", "AiSearchOutput", "cache::detect_project_root", "_private"] {
+        for q in [
+            "Cli",
+            "run_search",
+            "AiSearchOutput",
+            "cache::detect_project_root",
+            "_private",
+        ] {
             assert_eq!(classify(q).output_mode, OutputMode::Locate, "query: {q}");
         }
     }
@@ -102,8 +110,8 @@ mod tests {
         for q in [
             "处理文件搜索的模块",
             "how does indexing work",
-            "search",              // plain lowercase word → ambiguous → NL
-            "3rd_party",           // digit start → NL
+            "search",    // plain lowercase word → ambiguous → NL
+            "3rd_party", // digit start → NL
             "",
         ] {
             let d = classify(q);

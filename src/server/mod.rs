@@ -10,19 +10,15 @@
  * - Pure JSON to response body; logs to stderr
  */
 
+use crate::cache;
 use crate::chunker::Chunker;
 use crate::indexer::SearchIndex;
 use crate::postprocess;
 use crate::search::SearchEngine;
-use crate::types::{IndexConfig, SearchMode, SearchQuery};
 use crate::types::format::{AiFileOutput, AiLocateOutput, AiSearchOutput};
-use crate::cache;
+use crate::types::{IndexConfig, SearchMode, SearchQuery};
 // HTTP 框架统一由 core_lib::mcp 提供并重新导出（不再直接依赖 axum，见白皮书 §2）。
-use core_lib::mcp::axum::{
-    extract::State,
-    routing::post,
-    Json, Router,
-};
+use core_lib::mcp::axum::{extract::State, routing::post, Json, Router};
 use core_lib::mcp::{McpServer, Tool};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +78,12 @@ fn default_topk_file() -> usize {
     20
 }
 
-pub async fn serve(default_root: &Path, custom_index: Option<&PathBuf>, host: &str, port: u16) -> anyhow::Result<()> {
+pub async fn serve(
+    default_root: &Path,
+    custom_index: Option<&PathBuf>,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     let root = cache::detect_project_root(default_root);
     let state = Arc::new(AppState {
         engines: Mutex::new(HashMap::new()),
@@ -97,19 +98,23 @@ pub async fn serve(default_root: &Path, custom_index: Option<&PathBuf>, host: &s
         .with_state(state);
 
     // /health、/tools、/ 三个“壳层”交由 core_lib::mcp::McpServer 自动生成
-    McpServer::new("sts-x", env!("CARGO_PKG_VERSION"), crate::types::format::AI_HINT)
-        .tool(search_tool_schema())
-        .tool(file_tool_schema())
-        .merge(biz)
-        .serve(host, port)
-        .await
+    McpServer::new(
+        "sts-x",
+        env!("CARGO_PKG_VERSION"),
+        crate::types::format::AI_HINT,
+    )
+    .tool(search_tool_schema())
+    .tool(file_tool_schema())
+    .merge(biz)
+    .serve(host, port)
+    .await
 }
 
 /// `search` 工具的 MCP Schema（原 handle_tools 内容，迁移到 core_lib McpServer 声明）。
 fn search_tool_schema() -> Tool {
     Tool::new(
         "search",
-        "Unified code search (STS-X 3.0). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Or set output_mode explicitly. Response carries a \"mode\" discriminator field.",
+        "Unified code search (STS-X 3.3.1). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Or set output_mode explicitly. Response carries a \"mode\" discriminator field. Semantic recall via STX_SEMANTIC=1 (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -171,7 +176,9 @@ async fn get_or_create_engine(
         }
     }
 
-    let index_path = state.default_index_path.clone()
+    let index_path = state
+        .default_index_path
+        .clone()
         .unwrap_or_else(|| cache::index_dir_for(&canonical));
     let config = IndexConfig {
         project_root: canonical.clone(),
@@ -180,8 +187,19 @@ async fn get_or_create_engine(
     };
 
     let tantivy_dir = index_path.join("tantivy");
-    let needs_build = !tantivy_dir.join("meta.json").exists()
-        || cache::is_index_stale(&index_path, &canonical);
+    let semantic = crate::embed::semantic_requested();
+    let mut needs_build =
+        !tantivy_dir.join("meta.json").exists() || cache::is_index_stale(&index_path, &canonical);
+
+    // P0-2: semantic 请求但现有索引无 embedding → 强制重建（否则语义静默失效）
+    if !needs_build && semantic {
+        if let Ok(idx) = SearchIndex::new(config.clone(), None) {
+            if !idx.has_embeddings() {
+                tracing::info!("Semantic requested but index has no embeddings; rebuilding");
+                needs_build = true;
+            }
+        }
+    }
 
     if needs_build {
         tracing::info!("Building index for {} ...", canonical.display());
@@ -189,16 +207,43 @@ async fn get_or_create_engine(
         std::fs::create_dir_all(&index_path)?;
         let mut chunker = Chunker::new(&config.languages)?;
         let blocks = chunker.index_project(&canonical, &config)?;
-        let mut index = SearchIndex::new(config.clone(), None)?;
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        let mut index = SearchIndex::new(config.clone(), embed_model)?;
         index.index_blocks(blocks)?;
         index.index_file_paths(&config)?;
         eprintln!("[sts-x] Index ready ({} blocks)", index.len());
-        let engine = SearchEngine::new(Arc::new(index), None);
-        engines.insert(key.clone(), ProjectEngine { engine, config: config.clone() });
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        let engine = SearchEngine::new(Arc::new(index), embed_model);
+        engines.insert(
+            key.clone(),
+            ProjectEngine {
+                engine,
+                config: config.clone(),
+            },
+        );
     } else {
         let index = SearchIndex::new(config.clone(), None)?;
-        let engine = SearchEngine::new(Arc::new(index), None);
-        engines.insert(key.clone(), ProjectEngine { engine, config: config.clone() });
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        let engine = SearchEngine::new(Arc::new(index), embed_model);
+        engines.insert(
+            key.clone(),
+            ProjectEngine {
+                engine,
+                config: config.clone(),
+            },
+        );
     }
 
     Ok((key, config))
@@ -273,7 +318,10 @@ async fn handle_search(
 
     let context_lines = search_query.context_lines;
     let query_str = search_query.query.clone();
-    let is_locate = matches!(search_query.output_mode, Some(crate::types::OutputMode::Locate));
+    let is_locate = matches!(
+        search_query.output_mode,
+        Some(crate::types::OutputMode::Locate)
+    );
 
     match pe.engine.search(search_query) {
         Ok(mut resp) => {
@@ -358,4 +406,3 @@ async fn handle_file(
     out.total_hits = out.matches.len();
     Json(out)
 }
-

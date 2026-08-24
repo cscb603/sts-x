@@ -12,12 +12,12 @@
  * - Token-optimized defaults: top_k=2, context=0 for AI consumption
  */
 
-use crate::types::{IndexConfig, SearchQuery, SearchMode, format::format_human_readable};
+use crate::cache;
 use crate::chunker::Chunker;
 use crate::indexer::SearchIndex;
-use crate::search::SearchEngine;
-use crate::cache;
 use crate::postprocess;
+use crate::search::SearchEngine;
+use crate::types::{format::format_human_readable, IndexConfig, SearchMode, SearchQuery};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +41,9 @@ pub enum Commands {
         /// Languages to index (comma-separated, default: all supported)
         #[arg(short, long)]
         languages: Option<String>,
+        /// Index embeddings too (requires `--features semantic` build + local model)
+        #[arg(long)]
+        semantic: bool,
     },
     /// Search a project (auto-indexes if needed, auto-detects project root)
     Search {
@@ -89,6 +92,10 @@ pub enum Commands {
         /// Sort results by file modification time, most recent first
         #[arg(long)]
         sort_recent: bool,
+        /// Enable semantic vector recall (STX_SEMANTIC=1 env or --semantic).
+        /// Requires `--features semantic` build + a local embedding model.
+        #[arg(long)]
+        semantic: bool,
     },
     /// AI one-shot search (CLI path): auto-routes symbol→locate, NL→expand+budget.
     /// Shares src/router.rs with the MCP `search` tool — identical behavior on both paths.
@@ -101,6 +108,10 @@ pub enum Commands {
         /// Override the auto token budget (0 = use router default)
         #[arg(long, default_value = "0")]
         max_tokens: usize,
+        /// Enable semantic vector recall (STX_SEMANTIC=1 env or --semantic).
+        /// Requires `--features semantic` build + a local embedding model.
+        #[arg(long)]
+        semantic: bool,
     },
     /// File search: filename + content across ANY directory (no index needed).
     /// Uses ripgrep if available, else a gitignore-aware walk. Zero-config.
@@ -161,31 +172,85 @@ pub enum Commands {
 
 pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     match &cli.command {
-        Commands::Index { path, output, languages } => {
+        Commands::Index {
+            path,
+            output,
+            languages,
+            semantic,
+        } => {
             let p = resolve_path(path);
-            cmd_index(&p, output, languages).await
+            cmd_index(&p, output, languages, *semantic).await
         }
-        Commands::Search { query, path, index_path, filename, all, locate, top_k, context, human, max_tokens, path_filter, no_hint, sort_recent, .. } => {
+        Commands::Search {
+            query,
+            path,
+            index_path,
+            filename,
+            all,
+            locate,
+            top_k,
+            context,
+            human,
+            max_tokens,
+            path_filter,
+            no_hint,
+            sort_recent,
+            semantic,
+            ..
+        } => {
             let p = resolve_path(path);
             let mode = if *locate {
                 crate::types::OutputMode::Locate
             } else {
                 crate::types::OutputMode::Expand
             };
-            cmd_search(query, &p, index_path.as_ref(), *filename, *all, mode, *top_k, *context, *human, *max_tokens, path_filter.as_deref(), *no_hint, *sort_recent).await
+            cmd_search(
+                query,
+                &p,
+                index_path.as_ref(),
+                *filename,
+                *all,
+                mode,
+                *top_k,
+                *context,
+                *human,
+                *max_tokens,
+                path_filter.as_deref(),
+                *no_hint,
+                *sort_recent,
+                *semantic,
+            )
+            .await
         }
-        Commands::Ai { query, path, max_tokens } => {
+        Commands::Ai {
+            query,
+            path,
+            max_tokens,
+            semantic,
+        } => {
             let p = resolve_path(path);
-            run_ai(query, &p, *max_tokens).await
+            run_ai(query, &p, *max_tokens, *semantic).await
         }
-        Commands::File { query, path, name_only, top_k, no_rg, max_tokens } => {
+        Commands::File {
+            query,
+            path,
+            name_only,
+            top_k,
+            no_rg,
+            max_tokens,
+        } => {
             let p = match path {
                 Some(p) => normalize_path(p),
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
             cmd_file(query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
         }
-        Commands::Serve { path, index_path, host, port } => {
+        Commands::Serve {
+            path,
+            index_path,
+            host,
+            port,
+        } => {
             let p = resolve_path(path);
             cmd_serve(&p, index_path.as_ref(), host, *port).await
         }
@@ -203,7 +268,12 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 /// R1: AI one-shot entry (CLI path). Classifies the query via the shared
 /// `router` module (same logic as the MCP `search` tool) and reuses the
 /// existing `cmd_search` pipeline — no duplicated search logic.
-async fn run_ai(query: &str, root: &Path, max_tokens_override: usize) -> anyhow::Result<()> {
+async fn run_ai(
+    query: &str,
+    root: &Path,
+    max_tokens_override: usize,
+    semantic: bool,
+) -> anyhow::Result<()> {
     let decision = crate::router::classify(query);
     let max_tokens = if max_tokens_override > 0 {
         max_tokens_override
@@ -213,17 +283,18 @@ async fn run_ai(query: &str, root: &Path, max_tokens_override: usize) -> anyhow:
     cmd_search(
         query,
         root,
-        None,               // index_path: default cache dir
-        false,              // filename mode
-        false,              // all mode
+        None,  // index_path: default cache dir
+        false, // filename mode
+        false, // all mode
         decision.output_mode,
         decision.top_k,
-        0,                  // context_lines: full block for expand
-        false,              // human output: JSON for AI
+        0,     // context_lines: full block for expand
+        false, // human output: JSON for AI
         max_tokens,
-        None,               // path_filter
-        false,              // no_hint
-        false,              // sort_recent
+        None,  // path_filter
+        false, // no_hint
+        false, // sort_recent
+        semantic,
     )
     .await
 }
@@ -266,22 +337,49 @@ fn build_config(project_root: &Path, custom_index: Option<&PathBuf>) -> IndexCon
     }
 }
 
-async fn ensure_indexed(config: &IndexConfig) -> anyhow::Result<bool> {
+async fn ensure_indexed(config: &IndexConfig, semantic: bool) -> anyhow::Result<bool> {
     let tantivy_dir = config.index_path.join("tantivy");
     let meta = tantivy_dir.join("meta.json");
 
-    if meta.exists() && !cache::is_index_stale(&config.index_path, &config.project_root) {
+    let fresh = meta.exists() && !cache::is_index_stale(&config.index_path, &config.project_root);
+    let mut needs_rebuild = !fresh;
+
+    // P0-2: semantic 请求但现有索引无 embedding（曾以无模型/模型不可用构建，
+    // 或旧索引无 embedding 字段）→ 强制重建，否则语义检索永远静默失效。
+    if !needs_rebuild && semantic && meta.exists() {
+        if let Ok(idx) = SearchIndex::new(config.clone(), None) {
+            if !idx.has_embeddings() {
+                tracing::info!("Semantic requested but index has no embeddings; rebuilding");
+                eprintln!("[sts-x] Rebuilding index with embeddings (semantic enabled)...");
+                needs_rebuild = true;
+            }
+        }
+    }
+
+    if !needs_rebuild {
         tracing::debug!("Index exists and fresh at {}", config.index_path.display());
         return Ok(false);
     }
 
     if meta.exists() {
-        tracing::info!("Index is stale, rebuilding for: {}", config.project_root.display());
-        eprintln!("[sts-x] Index stale, rebuilding {} ...", config.project_root.display());
+        tracing::info!(
+            "Index is stale, rebuilding for: {}",
+            config.project_root.display()
+        );
+        eprintln!(
+            "[sts-x] Index stale, rebuilding {} ...",
+            config.project_root.display()
+        );
         std::fs::remove_dir_all(&config.index_path).ok();
     } else {
-        tracing::info!("No index found, auto-indexing project: {}", config.project_root.display());
-        eprintln!("[sts-x] Building index for {} ...", config.project_root.display());
+        tracing::info!(
+            "No index found, auto-indexing project: {}",
+            config.project_root.display()
+        );
+        eprintln!(
+            "[sts-x] Building index for {} ...",
+            config.project_root.display()
+        );
     }
 
     std::fs::create_dir_all(&config.index_path)?;
@@ -290,11 +388,20 @@ async fn ensure_indexed(config: &IndexConfig) -> anyhow::Result<bool> {
     let blocks = chunker.index_project(&config.project_root, config)?;
     tracing::info!("Found {} code blocks", blocks.len());
 
-    let mut index = SearchIndex::new(config.clone(), None)?;
+    let embed_model = if semantic {
+        crate::embed::maybe_load_model(config)
+    } else {
+        None
+    };
+    let mut index = SearchIndex::new(config.clone(), embed_model)?;
     index.index_blocks(blocks)?;
     index.index_file_paths(config)?;
 
-    eprintln!("[sts-x] Index ready ({} blocks) at {}", index.len(), config.index_path.display());
+    eprintln!(
+        "[sts-x] Index ready ({} blocks) at {}",
+        index.len(),
+        config.index_path.display()
+    );
     Ok(true)
 }
 
@@ -302,6 +409,7 @@ async fn cmd_index(
     project_root: &Path,
     output: &Option<PathBuf>,
     languages: &Option<String>,
+    semantic_flag: bool,
 ) -> anyhow::Result<()> {
     let mut config = build_config(project_root, output.as_ref());
     if let Some(langs) = languages {
@@ -317,11 +425,21 @@ async fn cmd_index(
     let blocks = chunker.index_project(project_root, &config)?;
     eprintln!("[sts-x] Parsed {} code blocks", blocks.len());
 
-    let mut index = SearchIndex::new(config.clone(), None)?;
+    let semantic = semantic_flag || crate::embed::semantic_requested();
+    let embed_model = if semantic {
+        crate::embed::maybe_load_model(&config)
+    } else {
+        None
+    };
+    let mut index = SearchIndex::new(config.clone(), embed_model)?;
     index.index_blocks(blocks)?;
     index.index_file_paths(&config)?;
 
-    eprintln!("[sts-x] Indexed {} blocks → {}", index.len(), config.index_path.display());
+    eprintln!(
+        "[sts-x] Indexed {} blocks → {}",
+        index.len(),
+        config.index_path.display()
+    );
     Ok(())
 }
 
@@ -340,11 +458,13 @@ async fn cmd_search(
     path_filter: Option<&str>,
     no_hint: bool,
     sort_recent: bool,
+    semantic_flag: bool,
 ) -> anyhow::Result<()> {
     let config = build_config(root, custom_index);
+    let semantic = semantic_flag || crate::embed::semantic_requested();
 
     if !filename_mode {
-        ensure_indexed(&config).await?;
+        ensure_indexed(&config, semantic).await?;
     }
 
     let mode = if all_mode {
@@ -356,7 +476,12 @@ async fn cmd_search(
     };
 
     let index = SearchIndex::new(config.clone(), None)?;
-    let mut engine = SearchEngine::new(Arc::new(index), None);
+    let embed_model = if semantic {
+        crate::embed::maybe_load_model(&config)
+    } else {
+        None
+    };
+    let mut engine = SearchEngine::new(Arc::new(index), embed_model);
 
     let query = SearchQuery {
         query: query_str.to_string(),
@@ -453,10 +578,18 @@ async fn cmd_file(
     Ok(())
 }
 
-async fn cmd_serve(root: &Path, custom_index: Option<&PathBuf>, host: &str, port: u16) -> anyhow::Result<()> {
+async fn cmd_serve(
+    root: &Path,
+    custom_index: Option<&PathBuf>,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     tracing::info!("Starting STS-X MCP server for project: {}", root.display());
     eprintln!("[sts-x] Serving {} on {}:{}", root.display(), host, port);
-    eprintln!("[sts-x] POST {{\"query\":\"...\"}} to http://{}:{}/search", host, port);
+    eprintln!(
+        "[sts-x] POST {{\"query\":\"...\"}} to http://{}:{}/search",
+        host, port
+    );
     eprintln!("[sts-x] Index stored at system cache (no project pollution)");
 
     crate::server::serve(root, custom_index, host, port).await?;

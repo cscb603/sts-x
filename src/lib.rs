@@ -9,6 +9,7 @@ pub mod filesearch;
 pub mod indexer;
 pub mod mcp;
 pub mod postprocess;
+pub mod rewrite;
 pub mod router;
 pub mod search;
 pub mod server;

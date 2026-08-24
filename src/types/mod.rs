@@ -122,8 +122,12 @@ pub struct SearchQuery {
     pub max_tokens: usize,
 }
 
-fn default_top_k() -> usize { 2 }
-fn default_context() -> usize { 0 }
+fn default_top_k() -> usize {
+    2
+}
+fn default_context() -> usize {
+    0
+}
 
 impl Default for SearchQuery {
     fn default() -> Self {

@@ -13,13 +13,13 @@
  * ping / tools/list / tools/call. Line-delimited JSON-RPC on stdin/stdout.
  */
 
-use crate::chunker::Chunker;
 use crate::cache;
+use crate::chunker::Chunker;
 use crate::filesearch;
 use crate::indexer::SearchIndex;
 use crate::search::SearchEngine;
-use crate::types::{IndexConfig, OutputMode, SearchMode, SearchQuery};
 use crate::types::format::{AiFileOutput, AiLocateOutput, AiSearchOutput};
+use crate::types::{IndexConfig, OutputMode, SearchMode, SearchQuery};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,21 +41,47 @@ fn ensure_engine(root: &Path, index_path_override: Option<&Path>) -> anyhow::Res
     };
 
     let tantivy_dir = index_path.join("tantivy");
-    let needs_build = !tantivy_dir.join("meta.json").exists()
-        || cache::is_index_stale(&index_path, &canonical);
+    let semantic = crate::embed::semantic_requested();
+    let mut needs_build =
+        !tantivy_dir.join("meta.json").exists() || cache::is_index_stale(&index_path, &canonical);
+
+    // P0-2: semantic 请求但现有索引无 embedding → 强制重建（否则语义静默失效）
+    if !needs_build && semantic {
+        if let Ok(idx) = SearchIndex::new(config.clone(), None) {
+            if !idx.has_embeddings() {
+                tracing::info!("Semantic requested but index has no embeddings; rebuilding");
+                needs_build = true;
+            }
+        }
+    }
 
     if needs_build {
         tracing::info!("Building index for {} ...", canonical.display());
         std::fs::create_dir_all(&index_path)?;
         let mut chunker = Chunker::new(&config.languages)?;
         let blocks = chunker.index_project(&canonical, &config)?;
-        let mut index = SearchIndex::new(config.clone(), None)?;
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        let mut index = SearchIndex::new(config.clone(), embed_model)?;
         index.index_blocks(blocks)?;
         index.index_file_paths(&config)?;
-        Ok(SearchEngine::new(Arc::new(index), None))
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        Ok(SearchEngine::new(Arc::new(index), embed_model))
     } else {
         let index = SearchIndex::new(config.clone(), None)?;
-        Ok(SearchEngine::new(Arc::new(index), None))
+        let embed_model = if semantic {
+            crate::embed::maybe_load_model(&config)
+        } else {
+            None
+        };
+        Ok(SearchEngine::new(Arc::new(index), embed_model))
     }
 }
 
@@ -121,10 +147,21 @@ impl McpEngine {
     }
 
     fn file(&self, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        let name_only = args.get("name_only").and_then(|v| v.as_bool()).unwrap_or(false)
-            || !args.get("content").and_then(|v| v.as_bool()).unwrap_or(true);
-        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let dir = args.get("path")
+        let name_only = args
+            .get("name_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || !args
+                .get("content")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let dir = args
+            .get("path")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -161,7 +198,7 @@ fn tools_list() -> serde_json::Value {
         "tools": [
             {
                 "name": "search",
-                "description": "Unified code search (STS-X 3.2.0). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field.",
+                "description": "Unified code search (STS-X 3.3.1). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field. Semantic recall available via STX_SEMANTIC=1 / semantic field (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -218,10 +255,14 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
         let req: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                let _ = writeln!(stdout, "{}", serde_json::json!({
-                    "jsonrpc": "2.0", "id": null,
-                    "error": {"code": -32700, "message": format!("parse error: {e}")}
-                }));
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": null,
+                        "error": {"code": -32700, "message": format!("parse error: {e}")}
+                    })
+                );
                 let _ = stdout.flush();
                 continue;
             }
@@ -241,12 +282,21 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
             })),
             "notifications/initialized" | "notifications/cancelled" => None,
             "ping" => Some(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})),
-            "tools/list" => Some(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": tools_list()})),
+            "tools/list" => {
+                Some(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": tools_list()}))
+            }
             "tools/call" => {
-                let name = req.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = req.pointer("/params/arguments").cloned().unwrap_or(serde_json::json!({}));
+                let name = req
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let args = req
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
                 // Resolve project root: explicit args.path > --path default > cwd.
-                let root = args.get("path")
+                let root = args
+                    .get("path")
                     .and_then(|v| v.as_str())
                     .map(PathBuf::from)
                     .or_else(|| Some(default_root.to_path_buf()));
@@ -333,6 +383,9 @@ mod tests {
         assert!(matches.is_empty(), "should be 0 hits, got {matches:?}");
         // locate 0 命中时应有 hint 自救（v5.1 契约）
         let hint = out["hint"].as_str().unwrap_or("");
-        assert!(hint.contains("换英文关键词") || hint.contains("换英文"), "hint={hint}");
+        assert!(
+            hint.contains("换英文关键词") || hint.contains("换英文"),
+            "hint={hint}"
+        );
     }
 }

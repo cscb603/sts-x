@@ -9,9 +9,9 @@
  * - Windows: %LOCALAPPDATA%\sts-x\cache\<hash>\
  */
 
-use std::path::{Path, PathBuf};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 fn path_hash(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -59,7 +59,9 @@ fn fallback_cache_root() -> PathBuf {
 }
 
 // v3: CJK bigram tokenizer introduced (index terms changed) → old v2 indexes must rebuild.
-const INDEX_VERSION: &str = "v3";
+// v4: P0-2 semantic embedding persisted as a tantivy bytes field → v3 indexes have no
+//     `embedding` field, so semantic search must rebuild to get embeddings stored.
+const INDEX_VERSION: &str = "v4";
 
 pub fn index_dir_for(project_root: &Path) -> PathBuf {
     let hash = path_hash(project_root);
@@ -77,8 +79,16 @@ pub fn resolve_index_path(project_root: &Path, custom: Option<&PathBuf>) -> Path
 /// Strong project markers — alone they prove a real project root.
 /// (`.stsx-root` is the explicit user pin and must stay strongest.)
 const STRONG_MARKERS: &[&str] = &[
-    ".git", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
-    "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml", ".stsx-root",
+    ".git",
+    "Cargo.toml",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "Makefile",
+    "CMakeLists.txt",
+    "build.gradle",
+    "pom.xml",
+    ".stsx-root",
 ];
 
 /// Weak markers — only count as a project root when corroborated.
@@ -181,9 +191,21 @@ fn cargo_toml_declares_workspace(path: &Path) -> bool {
 }
 
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", "build", "__pycache__",
-    ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
-    "vendor", ".next", ".nuxt", ".output",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "vendor",
+    ".next",
+    ".nuxt",
+    ".output",
 ];
 
 pub fn is_index_stale(index_path: &Path, project_root: &Path) -> bool {
@@ -250,10 +272,10 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn index_version_is_v3_for_cjk_rebuild() {
-        // v2 indexes used SimpleTokenizer (CJK = 1 giant token) and must be
-        // invalidated by the v3 bump; this test pins the constant.
-        assert_eq!(INDEX_VERSION, "v3");
+    fn index_version_is_v4_for_embedding_rebuild() {
+        // v3 indexes (CJK bigram) have no `embedding` tantivy field; the v4
+        // bump forces a rebuild so semantic search gets persisted embeddings.
+        assert_eq!(INDEX_VERSION, "v4");
     }
 
     /// Aggregate-root regression (F:\trae-cn style): a lone `package.json`
@@ -269,8 +291,15 @@ mod tests {
         let base = std::env::temp_dir().join(format!("stsx-root-test-{}-lone", std::process::id()));
         let agg = base.join("aggregate"); // aggregate dir with lone package.json
         fs::create_dir_all(&agg).ok();
-        fs::write(agg.join("package.json"), r#"{"dependencies":{"puppeteer":"^24"}}"#).ok();
-        assert!(!is_project_root(&agg), "lone package.json must not be a root");
+        fs::write(
+            agg.join("package.json"),
+            r#"{"dependencies":{"puppeteer":"^24"}}"#,
+        )
+        .ok();
+        assert!(
+            !is_project_root(&agg),
+            "lone package.json must not be a root"
+        );
         fs::remove_dir_all(&base).ok();
     }
 
@@ -281,7 +310,10 @@ mod tests {
         let proj = base.join("real-node-project");
         fs::create_dir_all(proj.join("node_modules")).ok();
         fs::write(proj.join("package.json"), "{}").ok();
-        assert!(is_project_root(&proj), "package.json + node_modules must be a root");
+        assert!(
+            is_project_root(&proj),
+            "package.json + node_modules must be a root"
+        );
         fs::remove_dir_all(&base).ok();
     }
 
@@ -289,7 +321,8 @@ mod tests {
     /// must land on the CHILD, not climb to the aggregate root.
     #[test]
     fn child_project_does_not_climb_to_lone_package_json_aggregate() {
-        let base = std::env::temp_dir().join(format!("stsx-root-test-{}-child", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("stsx-root-test-{}-child", std::process::id()));
         let agg = base.join("aggregate");
         let child = agg.join("my-lib");
         fs::create_dir_all(&child).ok();
@@ -298,7 +331,10 @@ mod tests {
         let detected = detect_project_root(&child);
         // canonicalize() may add the \\?\ long-path prefix on Windows; compare canonical forms.
         let want = child.canonicalize().unwrap_or(child.clone());
-        assert_eq!(detected, want, "should land on child (Cargo.toml), got {detected:?}");
+        assert_eq!(
+            detected, want,
+            "should land on child (Cargo.toml), got {detected:?}"
+        );
         fs::remove_dir_all(&base).ok();
     }
 
@@ -322,8 +358,7 @@ mod tests {
         let detected = detect_project_root(&deep);
         let want = deep.canonicalize().unwrap_or(deep.clone());
         assert_eq!(
-            detected,
-            want,
+            detected, want,
             "deep markerless subtree should return original, got {detected:?}"
         );
         fs::remove_dir_all(&base).ok();

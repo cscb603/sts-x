@@ -8,21 +8,19 @@
  * - Adjusts start_line/end_line to reflect the snippet
  */
 
-use crate::types::SearchResponse;
 use crate::types::format::{AiAggregateGroup, AiResultItem, AiSearchOutput};
+use crate::types::SearchResponse;
 
 pub fn post_process_results(resp: &mut SearchResponse, query: &str, context_lines: usize) {
     if context_lines == 0 {
         for result in &mut resp.results {
-            result.highlight_lines = find_matching_lines(&result.block.code, query, result.block.start_line);
+            result.highlight_lines =
+                find_matching_lines(&result.block.code, query, result.block.start_line);
         }
         return;
     }
 
-    let query_terms: Vec<&str> = query
-        .split_whitespace()
-        .filter(|t| t.len() >= 2)
-        .collect();
+    let query_terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
 
     if query_terms.is_empty() {
         return;
@@ -40,7 +38,9 @@ pub fn post_process_results(resp: &mut SearchResponse, query: &str, context_line
 
         let match_offset = lines.iter().position(|line| {
             let line_lower = line.to_lowercase();
-            query_terms.iter().any(|term| line_lower.contains(&term.to_lowercase()))
+            query_terms
+                .iter()
+                .any(|term| line_lower.contains(&term.to_lowercase()))
         });
 
         let match_offset = match_offset.unwrap_or(0);
@@ -54,18 +54,29 @@ pub fn post_process_results(resp: &mut SearchResponse, query: &str, context_line
         let highlight: Vec<usize> = (start_off..end_off)
             .filter(|&i| {
                 let line_lower = lines[i].to_lowercase();
-                query_terms.iter().any(|term| line_lower.contains(&term.to_lowercase()))
+                query_terms
+                    .iter()
+                    .any(|term| line_lower.contains(&term.to_lowercase()))
             })
             .map(|i| result.block.start_line + i)
             .collect();
 
         let snippet = lines[start_off..end_off].join("\n");
         let code = if start_off > 0 && end_off < lines.len() {
-            format!("// ... (+{} lines above)\n{}\n// ... ({} more lines)", start_off, snippet, lines.len().saturating_sub(end_off))
+            format!(
+                "// ... (+{} lines above)\n{}\n// ... ({} more lines)",
+                start_off,
+                snippet,
+                lines.len().saturating_sub(end_off)
+            )
         } else if start_off > 0 {
             format!("// ... (+{} lines above)\n{}", start_off, snippet)
         } else if end_off < lines.len() {
-            format!("{}\n// ... ({} more lines)", snippet, lines.len().saturating_sub(end_off))
+            format!(
+                "{}\n// ... ({} more lines)",
+                snippet,
+                lines.len().saturating_sub(end_off)
+            )
         } else {
             snippet
         };
@@ -124,7 +135,9 @@ pub fn aggregate_results(out: &mut AiSearchOutput) {
 
     let mut groups: Vec<AiAggregateGroup> = Vec::new();
     for name in hot {
-        let Some(mut items) = grouped.remove(name) else { continue };
+        let Some(mut items) = grouped.remove(name) else {
+            continue;
+        };
         let match_count = items.len();
         let file_count = {
             let mut files: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -134,7 +147,11 @@ pub fn aggregate_results(out: &mut AiSearchOutput) {
             files.len()
         };
         // Highest score first, dedup identical code bodies, keep top-3.
-        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut seen_code: std::collections::HashSet<String> = std::collections::HashSet::new();
         items.retain(|it| seen_code.insert(format!("{}|{}", it.path, it.code)));
         items.truncate(3);
@@ -151,10 +168,7 @@ pub fn aggregate_results(out: &mut AiSearchOutput) {
 }
 
 fn find_matching_lines(code: &str, query: &str, base_line: usize) -> Vec<usize> {
-    let query_terms: Vec<&str> = query
-        .split_whitespace()
-        .filter(|t| t.len() >= 2)
-        .collect();
+    let query_terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
     if query_terms.is_empty() {
         return Vec::new();
     }
@@ -162,7 +176,9 @@ fn find_matching_lines(code: &str, query: &str, base_line: usize) -> Vec<usize> 
         .enumerate()
         .filter(|(_, line)| {
             let line_lower = line.to_lowercase();
-            query_terms.iter().any(|term| line_lower.contains(&term.to_lowercase()))
+            query_terms
+                .iter()
+                .any(|term| line_lower.contains(&term.to_lowercase()))
         })
         .map(|(i, _)| base_line + i)
         .collect()
@@ -226,7 +242,10 @@ mod tests {
         assert!(g.top[0].score >= g.top[1].score);
 
         let folded_tokens = serde_json::to_string(&out).unwrap().len();
-        assert!(folded_tokens < flat_tokens, "aggregation must shrink output");
+        assert!(
+            folded_tokens < flat_tokens,
+            "aggregation must shrink output"
+        );
     }
 
     #[test]

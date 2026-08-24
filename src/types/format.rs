@@ -290,7 +290,15 @@ pub fn format_human_readable(resp: &SearchResponse) -> String {
             b.path.display(),
             b.start_line,
             if !result.highlight_lines.is_empty() {
-                format!("  [matches: L{}]", result.highlight_lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", L"))
+                format!(
+                    "  [matches: L{}]",
+                    result
+                        .highlight_lines
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", L")
+                )
             } else {
                 String::new()
             },

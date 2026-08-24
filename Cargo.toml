@@ -1,6 +1,6 @@
 [package]
 name = "sts-x"
-version = "3.2.0"
+version = "3.3.1"
 edition = "2021"
 description = "STS-X 3.2: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
 authors = ["星TAP实验室软件 <cscb603@qq.com>"]
@@ -59,7 +59,7 @@ dirs = "6"
 tantivy = "0.22"
 
 # ONNX inference (optional — for semantic search)
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"], optional = true }
+ort = { version = "2.0.0-rc.13", features = ["load-dynamic"], optional = true }
 ndarray = { version = "0.16", optional = true }
 tokenizers = { version = "0.21", optional = true }
 
