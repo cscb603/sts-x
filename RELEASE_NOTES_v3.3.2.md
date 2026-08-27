@@ -33,3 +33,34 @@
 - Phase 3 可选增强：frecency 缓存（长期项目文件优先级）、与现有 AST 索引联动（含定义文件优先）。
 - 如需让 WorkBuddy 默认调用 `glob`：把 `~/.workbuddy/mcp.json` 里 `sts-x` 的二进制指向本版，
   Agent 检索代码时会优先用 `glob` 而非系统 Glob。
+
+## 本次发布包（dist/）
+
+| 包 | 说明 |
+|---|---|
+| `STS-X-3.3.2-Mac版(给AI搜代码).zip` | 默认版（零依赖单文件，含 glob + BM25）。放到 `/usr/local/bin/` 或 `~/.local/bin/` 即可。 |
+| `STS-X-3.3.2-Win版(给AI搜代码).zip` | 默认版（crt-static 单文件 exe，Win10/11 双击即跑，无需 VC++ 运行库）。 |
+| `STS-X-3.3.2-源码.zip` | 完整源码（含 globsearch 模块）。 |
+| `STS-X-3.3.2-Mac版-语义检索.zip` | **全功能语义版**：额外带中文语义检索，需本机 onnxruntime 动态库（启动自动探测 `/usr/local/lib`）。 |
+
+## 接入 WorkBuddy / AI 客户端（原生 MCP stdio）
+
+无需端口、无需 Python，AI 客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "sts-x": {
+      "command": "/usr/local/bin/sts-x",
+      "args": ["mcp", "-p", "/你的项目根"],
+      "env": {
+        "STX_SEMANTIC": "1",
+        "ORT_DYLIB_PATH": "/usr/local/lib/libonnxruntime.1.28.0.dylib"
+      }
+    }
+  }
+}
+```
+
+暴露工具：`search`（代码搜索）/ `file`（任意目录零索引文件搜索）/ `glob`（按模式列文件，AI 友好排序+截断+诊断）。
+带 `STX_SEMANTIC=1` 即开启中文语义检索（依赖 onnxruntime 动态库；默认版不依赖，纯 BM25）。
