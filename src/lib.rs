@@ -6,6 +6,7 @@ pub mod chunker;
 pub mod cli;
 pub mod embed;
 pub mod filesearch;
+pub mod globsearch;
 pub mod indexer;
 pub mod mcp;
 pub mod postprocess;

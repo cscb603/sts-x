@@ -1,6 +1,6 @@
 [package]
 name = "sts-x"
-version = "3.3.1"
+version = "3.3.2"
 edition = "2021"
 description = "STS-X 3.2: 为 AI Agent 而生的统一代码+文件搜索引擎 — AST 切块 + BM25 + locate/expand 输出模式 + 零索引 file 搜索 + MCP，单二进制零依赖"
 authors = ["星TAP实验室软件 <cscb603@qq.com>"]
@@ -45,6 +45,10 @@ tree-sitter-ruby = "0.21"
 tree-sitter-scala = "0.21.0"
 devgen-tree-sitter-swift = "0.21.0"
 ignore = "0.4"
+# Glob pattern matching for the `glob` subcommand + MCP tool.
+# Already a transitive dep of `ignore` (present in Cargo.lock); pinning it
+# explicitly removes the implicit dependency and locks the version.
+globset = "0.4"
 
 # Path diff
 pathdiff = "0.2"

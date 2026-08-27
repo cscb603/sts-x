@@ -11,6 +11,7 @@
  * - _ai_instructions field: always present, tells AI how to use results
  */
 
+use crate::globsearch::{GlobHit, GlobResult};
 use crate::types::{FileMatch, LocateMatch, SearchResponse, SearchResult};
 use serde::Serialize;
 
@@ -258,6 +259,88 @@ impl AiFileOutput {
             search_time_ms,
         }
     }
+}
+
+// ─── glob-mode output (file-pattern discovery, ranked + truncated) ───────
+// Same contract as search/file: `total_hits` / `omitted` so the Agent knows
+// whether it saw everything; `rank_signals` explain each ranking decision;
+// `_ai_instructions` carries the zero-hit diagnosis (omitted when there are
+// results, to save tokens — same rule as the other modes).
+#[derive(Debug, Serialize)]
+pub struct AiGlobItem {
+    pub path: String,
+    pub abs_path: String,
+    pub size: u64,
+    pub mtime: i64,
+    pub score: f32,
+    pub rank_signals: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiGlobOutput {
+    pub query: String,
+    pub mode: &'static str,
+    pub total_hits: usize,
+    pub returned: usize,
+    pub omitted: usize,
+    pub matches: Vec<AiGlobItem>,
+    /// Zero-hit diagnosis (extension-based). Omitted when there are results.
+    #[serde(rename = "_ai_instructions", skip_serializing_if = "Option::is_none")]
+    pub _ai_instructions: Option<String>,
+    /// Volatile timing moved LAST (LLM prefix-cache friendly, v5.1-3 rule).
+    pub search_time_ms: u64,
+}
+
+impl AiGlobOutput {
+    pub fn from_result(query: String, result: GlobResult, search_time_ms: u64) -> Self {
+        let total = result.total_hits;
+        let returned = result.hits.len();
+        let omitted = total.saturating_sub(returned);
+        AiGlobOutput {
+            query,
+            mode: "glob",
+            total_hits: total,
+            returned,
+            omitted,
+            matches: result
+                .hits
+                .into_iter()
+                .map(|h: GlobHit| AiGlobItem {
+                    path: h.path,
+                    abs_path: h.abs_path,
+                    size: h.size,
+                    mtime: h.mtime,
+                    score: h.score,
+                    rank_signals: h.rank_signals,
+                })
+                .collect(),
+            _ai_instructions: result.diagnosis,
+            search_time_ms,
+        }
+    }
+}
+
+/// Human-readable glob output (used with `--human`).
+pub fn format_glob_human(out: &AiGlobOutput) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "STS-X Glob Results\n  Pattern: {}\n  Hits: {} (returned {} / omitted {} / {}ms)\n\n",
+        out.query, out.total_hits, out.returned, out.omitted, out.search_time_ms,
+    ));
+    for (i, m) in out.matches.iter().enumerate() {
+        s.push_str(&format!(
+            "[{}/{}] {:.0}%  {}  [{}]\n",
+            i + 1,
+            out.returned,
+            m.score * 100.0,
+            m.path,
+            m.rank_signals.join(", "),
+        ));
+    }
+    if let Some(h) = &out._ai_instructions {
+        s.push_str(&format!("\nHint: {}\n", h));
+    }
+    s
 }
 
 pub fn format_human_readable(resp: &SearchResponse) -> String {

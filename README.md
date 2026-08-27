@@ -5,14 +5,14 @@
 <h1 align="center">STS-X</h1>
 <p align="center">
   <strong>为 AI Agent 而生的「代码 + 文件」统一搜索引擎</strong><br>
-  AST感知切块 · BM25极速全文搜索 · 0命中自动重试 · 中文语义检索 · MCP原生协议<br>
+  AST感知切块 · BM25极速全文搜索 · 0命中自动重试 · 中文语义检索 · glob 模式列文件（AI 友好排序）· MCP原生协议<br>
   <em>二合一：代码搜索（locate 行级 / expand 整块）+ 任意目录零索引文件搜索</em><br>
   <em>深层任务省约 80% token（约为 grep+Read 流程的 1/5）</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/cscb603/sts-x/releases">
-    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.3.1">
+    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.3.2">
   </a>
   <img src="https://img.shields.io/badge/大小-6~30MB-10B981" alt="大小">
   <img src="https://img.shields.io/badge/定位-为_AI_而生-4F46E5" alt="定位">
@@ -62,7 +62,7 @@ STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代
 
 ### 一分钟上手
 
-**📥 下载（v3.3.1 最新）**
+**📥 下载（v3.3.2 最新）**
 
 | 平台 | 国内高速（蓝奏云） | GitHub Releases（备用） |
 |---|---|---|
@@ -90,8 +90,15 @@ sts-x search "select_best_cfg" --locate
 # 6. 人类友好模式
 sts-x search "token verification" -H
 
-# 7. 中文 NL → 英文代码语义直达（v3.3.1，语义版；0 命中会自动重试英文词/符号/文件兜底）
+# 7. 中文 NL → 英文代码语义直达（v3.3.2，语义版；0 命中会自动重试英文词/符号/文件兜底）
 STX_SEMANTIC=1 sts-x ai "缓存目录在哪里" -p /your-project
+
+# 8. 按模式列文件（AI 友好：静态排序 + top_k 截断 + 0 命中扩展名诊断）
+sts-x glob "**/*.rs" -p /your-project --top-k 20
+sts-x glob "*.toml,*.lock" -p /your-project          # 多模式逗号分隔
+sts-x glob "**/*.rs" -p /your-project --sort-recent  # 最近修改优先
+sts-x glob "src/**/*.rs" -p /your-project --git-aware # git 改动文件优先
+
 ```
 
 ```powershell
@@ -249,6 +256,7 @@ curl -X POST http://127.0.0.1:9876/file \
 | **Filename** | `search "query" -f` | `{"query":"...","filename":true}` | 文件名 | 匹配的文件路径 |
 | **All** | `search "query" --all` | `{"query":"...","all":true}` | 所有文件内容 | 代码 + 文本 + 配置 |
 | **File** | `file "query" [--path DIR]` | `{"query":"...","path":"/abs/dir","content":true}` | **任意目录**（零索引） | 文件名 + 内容行（rg 优先） |
+| **Glob** | `glob "**/*.rs" [--top-k N] [--sort-recent] [--git-aware]` | `{"patterns":"...","path":"/abs/dir","top_k":N,"sort_recent":bool,"git_aware":bool,"no_ignore":bool}` | 按模式列举文件（AI 友好排序+截断+诊断） | 匹配文件路径（`,` 多模式、`!` 排除、默认尊重 .gitignore） |
 
 ---
 
@@ -287,8 +295,8 @@ sts-x search "password|secret_key|api_key"
 
 | 项目 | 详情 |
 |------|------|
-| **版本** | v3.3.1（0 命中自动重试 + 中文语义检索） |
-| **二进制大小** | macOS 默认 6MB / 语义版 30MB；Windows 默认 6MB / 语义版 28MB |
+| **版本** | v3.3.2（glob 子命令 + MCP glob 工具 + 0 命中自动重试 + 中文语义检索） |
+| **二进制大小** | macOS 默认 ~27MB（包 5.4MB）/ 语义版 ~30MB（包 6.1MB）；Windows 默认 ~29MB（crt-static，单文件零依赖，包 5.7MB）/ 语义版 ~28MB |
 | **搜索延迟** | 0–2ms（千级文件） |
 | **索引引擎** | Tantivy BM25（自定义 code 分词器） |
 | **AST 解析** | tree-sitter（9 种语言） |
@@ -298,6 +306,7 @@ sts-x search "password|secret_key|api_key"
 | **支持语言** | Rust · Python · JavaScript · TypeScript · TSX · Java · C · C++ · Go |
 | **输出模式** | `expand`（完整 AST 块）/ `locate`（行级 grep 尺寸，≤200 tok） |
 | **文件搜索** | `file` 子命令 / `/file` 工具，零索引，rg 优先（任意目录） |
+| **模式列举** | `glob` 子命令 / `glob` MCP 工具：多模式匹配（`,` 分隔、`!` 排除），AI 友好静态排序（浅层源码优先 / test·vendor 降权 / 最近修改·git 改动升权）+ `top_k` 截断 + 0 命中扩展名诊断 |
 | **响应字段** | score · path · lines · highlight_lines · kind · name · signature · language · code · _ai_instructions |
 | **索引存储** | 系统缓存目录（不污染项目，自动重建） |
 | **可选增强** | 中文语义检索 `STX_SEMANTIC=1`（bge-small-zh-v1.5，中文 NL → 英文代码语义直达；onnxruntime 自动探测，零配置）|

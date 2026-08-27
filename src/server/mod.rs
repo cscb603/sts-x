@@ -114,7 +114,7 @@ pub async fn serve(
 fn search_tool_schema() -> Tool {
     Tool::new(
         "search",
-        "Unified code search (STS-X 3.3.1). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Or set output_mode explicitly. Response carries a \"mode\" discriminator field. Semantic recall via STX_SEMANTIC=1 (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
+        "Unified code search (STS-X 3.3.2). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Or set output_mode explicitly. Response carries a \"mode\" discriminator field. Semantic recall via STX_SEMANTIC=1 (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
         serde_json::json!({
             "type": "object",
             "properties": {

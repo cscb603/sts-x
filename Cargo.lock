@@ -2016,7 +2016,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "sts-x"
-version = "3.3.1"
+version = "3.3.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2024,6 +2024,7 @@ dependencies = [
  "devgen-tree-sitter-swift",
  "dirs",
  "encoding_rs",
+ "globset",
  "ignore",
  "ndarray 0.16.1",
  "ort",

@@ -136,6 +136,34 @@ pub enum Commands {
         #[arg(long, default_value = "0")]
         max_tokens: usize,
     },
+    /// Glob file discovery: list files matching a glob pattern, ranked for AI.
+    /// Returns truncated results with total_hits and omitted count. Use this
+    /// instead of raw file listing when you need to discover files by pattern.
+    Glob {
+        /// Glob pattern(s): comma-separated, e.g. "**/*.rs" or "*.toml,*.lock"
+        patterns: String,
+        /// Directory to search (default: current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        /// Max results to return (default: 20)
+        #[arg(long, default_value = "20")]
+        top_k: usize,
+        /// Cap total output to roughly this many tokens (0 = unlimited, default 500)
+        #[arg(long, default_value = "500")]
+        max_tokens: usize,
+        /// Sort results by file modification time, most recent first
+        #[arg(long)]
+        sort_recent: bool,
+        /// Rank git-modified / untracked files first
+        #[arg(long)]
+        git_aware: bool,
+        /// Do not respect .gitignore (include ignored files)
+        #[arg(long)]
+        no_ignore: bool,
+        /// Human-readable output instead of default JSON
+        #[arg(short = 'H', long)]
+        human: bool,
+    },
     /// Start MCP HTTP server (auto-indexes, supports multi-project via "path" field)
     Serve {
         /// Project root path (default: auto-detected from current directory)
@@ -244,6 +272,32 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
                 None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             };
             cmd_file(query, &p, *name_only, *top_k, *no_rg, *max_tokens).await
+        }
+        Commands::Glob {
+            patterns,
+            path,
+            top_k,
+            max_tokens,
+            sort_recent,
+            git_aware,
+            no_ignore,
+            human,
+        } => {
+            let dir = match path {
+                Some(p) => normalize_path(p),
+                None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            };
+            cmd_glob(
+                patterns,
+                &dir,
+                *top_k,
+                *max_tokens,
+                *sort_recent,
+                *git_aware,
+                *no_ignore,
+                *human,
+            )
+            .await
         }
         Commands::Serve {
             path,
@@ -575,6 +629,44 @@ async fn cmd_file(
     let mut out = out;
     out.total_hits = out.matches.len();
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_glob(
+    patterns: &str,
+    dir: &Path,
+    top_k: usize,
+    max_tokens: usize,
+    sort_recent: bool,
+    git_aware: bool,
+    no_ignore: bool,
+    human: bool,
+) -> anyhow::Result<()> {
+    let req = crate::globsearch::GlobRequest {
+        patterns: patterns
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        dir: dir.to_path_buf(),
+        top_k,
+        max_tokens,
+        sort_recent,
+        git_aware,
+        no_ignore,
+    };
+    let start = std::time::Instant::now();
+    let result = crate::globsearch::run_glob(&req)?;
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    let out =
+        crate::types::format::AiGlobOutput::from_result(patterns.to_string(), result, elapsed);
+    if human {
+        println!("{}", crate::types::format::format_glob_human(&out));
+    } else {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    }
     Ok(())
 }
 

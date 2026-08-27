@@ -191,6 +191,54 @@ impl McpEngine {
         out.total_hits = out.matches.len();
         Ok(serde_json::to_value(out)?)
     }
+
+    fn glob(&self, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let patterns = args
+            .get("patterns")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let dir = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let max_tokens = args
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as usize;
+        let sort_recent = args
+            .get("sort_recent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let git_aware = args
+            .get("git_aware")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let no_ignore = args
+            .get("no_ignore")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let req = crate::globsearch::GlobRequest {
+            patterns: patterns
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            dir,
+            top_k,
+            max_tokens,
+            sort_recent,
+            git_aware,
+            no_ignore,
+        };
+        let start = std::time::Instant::now();
+        let result = crate::globsearch::run_glob(&req)?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        let out = crate::types::format::AiGlobOutput::from_result(patterns, result, elapsed);
+        Ok(serde_json::to_value(out)?)
+    }
 }
 
 fn tools_list() -> serde_json::Value {
@@ -198,7 +246,7 @@ fn tools_list() -> serde_json::Value {
         "tools": [
             {
                 "name": "search",
-                "description": "Unified code search (STS-X 3.3.1). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field. Semantic recall available via STX_SEMANTIC=1 / semantic field (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
+                "description": "Unified code search (STS-X 3.3.2). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field. Semantic recall available via STX_SEMANTIC=1 / semantic field (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -230,6 +278,23 @@ fn tools_list() -> serde_json::Value {
                         "max_tokens": { "type": "integer", "description": "Cap output tokens (0 = unlimited)", "default": 0 }
                     },
                     "required": ["query"]
+                }
+            },
+            {
+                "name": "glob",
+                "description": "List files matching a glob pattern, ranked for AI. Returns truncated results with total_hits and omitted count. Use this instead of raw file listing when discovering files by pattern (e.g. '**/*.rs', '*.toml,*.lock'). Honors .gitignore by default; pass no_ignore=true to include ignored files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "patterns": { "type": "string", "description": "Glob pattern(s), comma-separated, e.g. '**/*.rs' or '*.toml,*.lock'" },
+                        "path": { "type": "string", "description": "Directory to search (default: cwd)" },
+                        "top_k": { "type": "integer", "description": "Maximum results (default 20)", "default": 20 },
+                        "max_tokens": { "type": "integer", "description": "Cap output tokens (0 = unlimited, default 500)", "default": 500 },
+                        "sort_recent": { "type": "boolean", "description": "Rank most-recently-modified first", "default": false },
+                        "git_aware": { "type": "boolean", "description": "Rank git-modified/untracked files first", "default": false },
+                        "no_ignore": { "type": "boolean", "description": "Do not respect .gitignore", "default": false }
+                    },
+                    "required": ["patterns"]
                 }
             }
         ]
@@ -308,6 +373,7 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
                     match name {
                         "search" => eng.search(&args),
                         "file" => eng.file(&args),
+                        "glob" => eng.glob(&args),
                         _ => anyhow::bail!("unknown tool: {name}"),
                     }
                 })();
@@ -348,7 +414,7 @@ mod tests {
         // MCP 协议字段必须 inputSchema（驼峰）—— WorkBuddy 严格校验
         let v = tools_list();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
         for t in tools {
             assert!(t.get("inputSchema").is_some(), "missing inputSchema: {t}");
             assert!(t.get("input_schema").is_none(), "must NOT be snake_case");
@@ -356,6 +422,36 @@ mod tests {
         }
         assert_eq!(tools[0]["name"], "search");
         assert_eq!(tools[1]["name"], "file");
+        assert_eq!(tools[2]["name"], "glob");
+    }
+
+    #[test]
+    fn glob_tool_requires_patterns_and_is_camel_case() {
+        let v = tools_list();
+        let tools = v["tools"].as_array().unwrap();
+        let glob = tools
+            .iter()
+            .find(|t| t["name"] == "glob")
+            .expect("glob tool present");
+        assert_eq!(glob["inputSchema"]["type"], "object");
+        let props = glob["inputSchema"]["properties"].as_object().unwrap();
+        // All field names must be camelCase (MCP strict validation).
+        for key in [
+            "patterns",
+            "path",
+            "top_k",
+            "max_tokens",
+            "sort_recent",
+            "git_aware",
+            "no_ignore",
+        ] {
+            assert!(props.contains_key(key), "missing glob prop: {key}");
+        }
+        let required = glob["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            required.contains(&serde_json::json!("patterns")),
+            "patterns must be required"
+        );
     }
 
     #[test]
