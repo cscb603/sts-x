@@ -20,9 +20,18 @@ use crate::indexer::SearchIndex;
 use crate::search::SearchEngine;
 use crate::types::format::{AiFileOutput, AiLocateOutput, AiSearchOutput};
 use crate::types::{IndexConfig, OutputMode, SearchMode, SearchQuery};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// How many per-project engines an MCP session keeps resident.
+///
+/// One MCP session may legitimately serve several projects (the AI passes a
+/// different `path` per call). Each engine holds an open tantivy index, so the
+/// cache is bounded; on overflow we drop all of them (the next call rebuilds)
+/// rather than letting a long-lived session grow without limit.
+const MAX_CACHED_ENGINES: usize = 8;
 
 /// Ensure a project root is indexed (mirrors server::get_or_create_engine).
 ///
@@ -246,7 +255,7 @@ fn tools_list() -> serde_json::Value {
         "tools": [
             {
                 "name": "search",
-                "description": "Unified code search (STS-X 3.3.2). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field. Semantic recall available via STX_SEMANTIC=1 / semantic field (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
+                "description": "Unified code search (STS-X 3.3.3). BM25 over AST blocks, auto-indexes if needed, supports multi-project via path. Zero-hit AUTO-RETRY: 0 命中自动按英文同义词(本地词典)→符号猜测→file 内容兜底重试，单次调用即出最佳结果。Omit output_mode to AUTO-ROUTE: symbol-like query→locate (grep-sized, cheap), natural language→expand (full blocks, token-budgeted). Response carries a \"mode\" discriminator field. Semantic recall available via STX_SEMANTIC=1 / semantic field (Chinese NL → English code, e.g. 缓存目录在哪里 → cache.rs).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -303,7 +312,14 @@ fn tools_list() -> serde_json::Value {
 
 /// Entry: `sts-x mcp [--path DIR]`. Reads JSON-RPC from stdin, writes to stdout.
 pub fn run(default_root: &Path) -> anyhow::Result<()> {
-    let mut engine_holder: Option<McpEngine> = None;
+    // Per-project engine registry, keyed by canonical project root.
+    //
+    // Previously a single engine was built from the FIRST request's root and
+    // reused forever. Since `SearchEngine::search` ignores `SearchQuery::path`,
+    // every later call with a different `path` silently returned hits from the
+    // wrong project — the worst kind of bug (plausible output, wrong source).
+    // Keying by root makes `path` actually work across projects/disks.
+    let mut engines: HashMap<PathBuf, McpEngine> = HashMap::new();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -360,16 +376,25 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
                     .cloned()
                     .unwrap_or(serde_json::json!({}));
                 // Resolve project root: explicit args.path > --path default > cwd.
-                let root = args
+                let raw_root = args
                     .get("path")
                     .and_then(|v| v.as_str())
                     .map(PathBuf::from)
-                    .or_else(|| Some(default_root.to_path_buf()));
+                    .unwrap_or_else(|| default_root.to_path_buf());
+                // Canonicalize so `/path`, `/path/` and a symlinked variant all
+                // map to the same engine instead of building duplicates.
+                let root = raw_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| raw_root.to_path_buf());
                 let result = (|| -> anyhow::Result<serde_json::Value> {
-                    if engine_holder.is_none() {
-                        engine_holder = Some(McpEngine::for_path(root.as_deref().unwrap())?);
+                    if !engines.contains_key(&root) {
+                        if engines.len() >= MAX_CACHED_ENGINES {
+                            engines.clear();
+                        }
+                        tracing::info!("mcp: loading engine for {}", root.display());
+                        engines.insert(root.clone(), McpEngine::for_path(&root)?);
                     }
-                    let eng = engine_holder.as_mut().unwrap();
+                    let eng = engines.get_mut(&root).unwrap();
                     match name {
                         "search" => eng.search(&args),
                         "file" => eng.file(&args),
@@ -377,6 +402,8 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
                         _ => anyhow::bail!("unknown tool: {name}"),
                     }
                 })();
+                // Record activity so the idle GC scanner waits for a quiet gap.
+                crate::gc::touch_activity();
                 match result {
                     Ok(data) => Some(serde_json::json!({
                         "jsonrpc": "2.0", "id": id,

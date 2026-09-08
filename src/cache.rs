@@ -266,6 +266,116 @@ fn has_newer_files(dir: &Path, threshold: &std::time::SystemTime, depth: u32) ->
     false
 }
 
+/// Parse a `vN` directory name into its numeric version. Returns `None` for
+/// anything that isn't exactly `v` followed by ASCII digits, so transient or
+/// unrelated dirs (`cache`, `v4-tmp`, `meta`) are never mistaken for versions.
+fn version_int(name: &str) -> Option<u32> {
+    let trimmed = name.strip_prefix('v').unwrap_or(name);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<u32>().ok()
+}
+
+/// Current index version as an integer (e.g. `INDEX_VERSION = "v4"` -> 4).
+fn current_version_int() -> u32 {
+    version_int(INDEX_VERSION).unwrap_or(0)
+}
+
+/// Directories that may legitimately hold versioned index dirs.
+///
+/// Two historical layouts exist:
+/// - current (macOS/Linux): `<cache_root>/vN`, where `cache_root()` itself is
+///   `.../sts-x`
+/// - legacy (Windows): `<...>/sts-x/cache/vN`, so stale index versions sit one
+///   level ABOVE `cache_root()`, i.e. directly under `.../sts-x`
+///
+/// We only ascend to the parent when that parent is still the `sts-x`
+/// directory. Otherwise the parent is a SHARED system cache root
+/// (`~/Library/Caches` on macOS, `~/.cache` on Linux) and scanning it would
+/// delete unrelated `vN` directories owned by other applications.
+fn gc_bases() -> Vec<PathBuf> {
+    let root = cache_root();
+    let mut bases = vec![root.clone()];
+    if let Some(parent) = root.parent() {
+        let is_sts_x_dir = parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("sts-x"))
+            .unwrap_or(false);
+        if is_sts_x_dir {
+            bases.push(parent.to_path_buf());
+        }
+    }
+    bases
+}
+
+/// Delete every index version directory strictly OLDER than the active version.
+///
+/// Scans `cache_root()` (current `.../sts-x/vN` layout) plus the legacy
+/// `.../sts-x/cache/vN` parent when applicable (see [`gc_bases`]), so upgrades
+/// from any era are reclaimed. Never deletes the active version or any
+/// directory outside sts-x's own cache. Returns the count removed.
+///
+/// This is the in-process replacement for the external "manual GC" that sts-x
+/// previously lacked — see the `gc` module for the idle-gated scheduler.
+pub fn gc_old_index_versions() -> usize {
+    let cur = current_version_int();
+    if cur == 0 {
+        return 0; // defensive: unknown current version -> touch nothing
+    }
+    let mut removed = 0usize;
+    for base in gc_bases() {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(v) = version_int(&name) else {
+                continue;
+            };
+            if v >= cur {
+                continue; // current or newer -> keep
+            }
+            let path = entry.path();
+            if path.is_dir() && std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+                tracing::info!("gc: removed stale index dir {}", path.display());
+            }
+        }
+    }
+    removed
+}
+
+/// True when an index version directory older than the active one exists.
+///
+/// Scans the same candidate directories as [`gc_old_index_versions`]; kept in
+/// sync so the idle scheduler's cheap probe never reports stale state that the
+/// sweep would then refuse to delete.
+pub fn has_stale_index_versions() -> bool {
+    let cur = current_version_int();
+    if cur == 0 {
+        return false;
+    }
+    for base in gc_bases() {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(v) = version_int(&name) {
+                if v < cur {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{detect_project_root, is_project_root, INDEX_VERSION};

@@ -70,8 +70,16 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Start the background idle GC scanner (reclaims stale index versions
+    // during quiet gaps; one-shot CLI modes also get a final sweep on exit).
+    sts_x::gc::spawn_index_gc();
+
     let cli = Cli::parse();
     cli::run(&cli).await?;
+
+    // One-shot CLI modes: reclaim stale index versions on the way out.
+    // (The MCP server keeps the background idle GC thread alive instead.)
+    sts_x::gc::run_final_gc();
 
     Ok(())
 }

@@ -529,7 +529,9 @@ async fn cmd_search(
         SearchMode::Code
     };
 
-    let index = SearchIndex::new(config.clone(), None)?;
+    // Self-heal: if the on-disk index is corrupt (torn write / schema mismatch),
+    // open_index_selfheal deletes and rebuilds it once instead of erroring out.
+    let index = crate::indexer::open_index_selfheal(&config, semantic)?;
     let embed_model = if semantic {
         crate::embed::maybe_load_model(&config)
     } else {

@@ -12,6 +12,7 @@
  * For larger scale, a dedicated vector DB can be swapped in.
  */
 
+use crate::chunker::Chunker;
 use crate::embed::EmbeddingModel;
 use crate::types::{CodeBlock, IndexConfig, LocateMatch, SearchResult};
 use anyhow::{Context, Result};
@@ -1202,6 +1203,56 @@ fn encode_f32s(v: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&f.to_le_bytes());
     }
     out
+}
+
+/// Open an existing index, transparently recovering from corruption.
+///
+/// If the on-disk index fails to open (torn write from a killed reindex,
+/// a schema mismatch after a version bump, etc.), we delete it and rebuild
+/// ONCE, then reopen. This turns a previously-fatal "Failed to open index"
+/// error into a silent self-heal — the resilience layer the user asked for,
+/// and the fix for the 2026-09 incident where a half-written index broke
+/// every search until a manual rebuild.
+///
+/// Returns `Err` only if the *rebuild* itself also fails — no infinite retry.
+pub fn open_index_selfheal(config: &IndexConfig, semantic: bool) -> Result<SearchIndex> {
+    match SearchIndex::new(config.clone(), None) {
+        Ok(idx) => Ok(idx),
+        Err(e) => {
+            tracing::warn!(
+                "index open failed ({}); treating as corrupt, rebuilding once",
+                e
+            );
+            eprintln!("[sts-x] Recovering a corrupted index, rebuilding ...");
+            rebuild_index(config, semantic)?;
+            SearchIndex::new(config.clone(), None)
+        }
+    }
+}
+
+/// Tear down and fully rebuild the index for `config`. Used by
+/// `open_index_selfheal` after detecting corruption. Mirrors the build path in
+/// `cli::ensure_indexed` / `mcp::ensure_engine` so a self-healed index is
+/// byte-for-byte equivalent to a normal fresh build.
+fn rebuild_index(config: &IndexConfig, semantic: bool) -> Result<()> {
+    let _ = std::fs::remove_dir_all(&config.index_path);
+    std::fs::create_dir_all(&config.index_path)?;
+    let mut chunker = Chunker::new(&config.languages)?;
+    let blocks = chunker.index_project(&config.project_root, config)?;
+    let embed_model = if semantic {
+        crate::embed::maybe_load_model(config)
+    } else {
+        None
+    };
+    let mut index = SearchIndex::new(config.clone(), embed_model)?;
+    index.index_blocks(blocks)?;
+    index.index_file_paths(config)?;
+    tracing::info!(
+        "self-heal rebuild complete ({} blocks) at {}",
+        index.len(),
+        config.index_path.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,14 +5,14 @@
 <h1 align="center">STS-X</h1>
 <p align="center">
   <strong>为 AI Agent 而生的「代码 + 文件」统一搜索引擎</strong><br>
-  AST感知切块 · BM25极速全文搜索 · 0命中自动重试 · 中文语义检索 · glob 模式列文件（AI 友好排序）· MCP原生协议<br>
+  AST感知切块 · BM25极速全文搜索 · 0命中自动重试 · 中文语义检索 · MCP原生协议<br>
   <em>二合一：代码搜索（locate 行级 / expand 整块）+ 任意目录零索引文件搜索</em><br>
   <em>深层任务省约 80% token（约为 grep+Read 流程的 1/5）</em>
 </p>
 
 <p align="center">
   <a href="https://github.com/cscb603/sts-x/releases">
-    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.3.2">
+    <img src="https://img.shields.io/github/v/release/cscb603/sts-x?label=版本&color=4F46E5" alt="版本 3.3.3">
   </a>
   <img src="https://img.shields.io/badge/大小-6~30MB-10B981" alt="大小">
   <img src="https://img.shields.io/badge/定位-为_AI_而生-4F46E5" alt="定位">
@@ -62,7 +62,7 @@ STS-X 是一个**面向 AI Agent 的代码搜索引擎**，专为大模型时代
 
 ### 一分钟上手
 
-**📥 下载（v3.3.2 最新）**
+**📥 下载（v3.3.3 最新）**
 
 | 平台 | 国内高速（蓝奏云） | GitHub Releases（备用） |
 |---|---|---|
@@ -296,7 +296,7 @@ sts-x search "password|secret_key|api_key"
 | 项目 | 详情 |
 |------|------|
 | **版本** | v3.3.2（glob 子命令 + MCP glob 工具 + 0 命中自动重试 + 中文语义检索） |
-| **二进制大小** | macOS 默认 ~27MB（包 5.4MB）/ 语义版 ~30MB（包 6.1MB）；Windows 默认 ~29MB（crt-static，单文件零依赖，包 5.7MB）/ 语义版 ~28MB |
+| **二进制大小** | macOS 默认 6MB / 语义版 30MB；Windows 默认 6MB / 语义版 28MB |
 | **搜索延迟** | 0–2ms（千级文件） |
 | **索引引擎** | Tantivy BM25（自定义 code 分词器） |
 | **AST 解析** | tree-sitter（9 种语言） |
