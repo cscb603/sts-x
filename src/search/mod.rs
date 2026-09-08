@@ -59,8 +59,15 @@ impl SearchEngine {
     /// Locate mode (3.0): grep-sized line hits inside the top AST blocks.
     /// Returns individual matching lines (with small context) instead of whole blocks,
     /// so the AI gets the location cheaply (~130 tok) before deciding to `--expand`.
-    fn search_code_locate(&self, query: &SearchQuery) -> Result<SearchResponse> {
+    fn search_code_locate(&mut self, query: &SearchQuery) -> Result<SearchResponse> {
         let start = Instant::now();
+
+        // ── P0-2: 语义查询 embedding（与 search_code_mode 对称）──────
+        // locate 模式此前完全没有向量通道，导致 --semantic --locate 下语义检索静默失效。
+        let query_embedding = self.embed_model.as_mut().and_then(|m| {
+            let query_text = format!("query: {}", query.query);
+            m.encode(&query_text).ok()
+        });
 
         // Match terms. For a single long token with no whitespace (e.g.
         // `select_best_cfg`), treat the whole query as one term so it still matches.
@@ -166,6 +173,26 @@ impl SearchEngine {
             matches.append(&mut live);
         }
 
+        // ── P0-2: 语义召回（locate 模式此前缺失向量通道）────────────
+        // BM25 + live grep 均 0 命中（中文 NL / 跨语言查询典型），且语义已启用时，
+        // 用查询 embedding 走 cosine 召回，转成 locate 命中，避免语义检索在
+        // --locate 下静默失效（与 search_code_mode 的 vector fallback 对称）。
+        if matches.is_empty() {
+            if let Some(qe) = query_embedding.as_deref() {
+                if let Ok(vec_raw) = self.index.search_vector(qe, query.top_k * 2) {
+                    for (sim, ib) in vec_raw {
+                        if matches.len() >= budget {
+                            break;
+                        }
+                        let short = short_path(&ib.block.path.display().to_string());
+                        if seen_paths.insert(short.clone()) {
+                            matches.push(Self::locate_match_for(ib, &short, sim));
+                        }
+                    }
+                }
+            }
+        }
+
         let elapsed = start.elapsed().as_millis() as u64;
         // v5.1 (P0-2): zero-hit locate → rescue hint so the AI can self-recover.
         // v5.1-3: build_hint returns Option (None on hits>0); called with 0 here.
@@ -183,6 +210,28 @@ impl SearchEngine {
             locate_matches: matches,
             hint,
         })
+    }
+
+    /// Convert an indexed block (from vector recall) into a grep-sized `LocateMatch`.
+    /// The hit line is the block's signature line (line 0) — sufficient for the AI to
+    /// jump to the right location before deciding to `--expand`.
+    fn locate_match_for(ib: &crate::indexer::IndexedBlock, short: &str, sim: f32) -> LocateMatch {
+        let lines: Vec<&str> = ib.block.code.lines().collect();
+        let trimmed = lines.first().map(|l| l.trim()).unwrap_or("");
+        let ctx = if trimmed.chars().count() > 48 {
+            format!("{}…", trimmed.chars().take(48).collect::<String>())
+        } else {
+            trimmed.to_string()
+        };
+        LocateMatch {
+            score: if sim > 0.0 { sim.min(1.0) } else { 0.0 },
+            file: short.to_string(),
+            abs_path: ib.block.abs_path.display().to_string(),
+            line: ib.block.start_line,
+            context: ctx,
+            kind: format!("{:?}", ib.block.kind).to_lowercase(),
+            name: ib.block.name.clone(),
+        }
     }
 
     /// Code search (AST chunks, BM25 + optional embedding)
