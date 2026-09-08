@@ -55,9 +55,14 @@ def main():
         ],
     )
 
-    # 2) Windows：默认零依赖 exe + 语义版 exe + 语义依赖（lib/ + models/）
+    # 2) Windows：扁平布局 —— BM25 版 + 语义版 同包，语义依赖（onnxruntime.dll +
+    #    VC++ 2022 运行库 + models/）全部放在 exe 同级。exe 启动时已用 SetDllDirectoryW
+    #    把 dll 所在目录加入搜索路径，从根上消除 ERROR_DLL_INIT_FAILED (1114)。
     win_dll = os.path.join(ROOT, "_scratch", "win-dll", "onnxruntime.dll")
     model_dir = os.path.join(ROOT, "models", "bge-small-zh-v1.5")
+    # VC++ 2022 运行库（Microsoft 官方再发行件）：从外接盘 venv 取，缺失则告警跳过
+    vc_src = "/Volumes/XTAP1T/models/ACE-Step-1.5/.venv/Lib/site-packages/PyQt5/Qt5/bin"
+    vc_dlls = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "concrt140.dll"]
     win_items = [
         (os.path.join(DIST, "sts-x-3.3.3-win64.exe"), "sts-x.exe"),
         (os.path.join(DIST, "sts-x-3.3.3-win64-semantic.exe"), "sts-x-semantic.exe"),
@@ -66,7 +71,15 @@ def main():
         (readme, "README.md"),
     ]
     if os.path.exists(win_dll):
-        win_items.append((win_dll, "lib/onnxruntime.dll"))
+        win_items.append((win_dll, "onnxruntime.dll"))
+    else:
+        print("  ⚠️ 缺 _scratch/win-dll/onnxruntime.dll")
+    for vc in vc_dlls:
+        sp = os.path.join(vc_src, vc)
+        if os.path.exists(sp):
+            win_items.append((sp, vc))
+        else:
+            print(f"  ⚠️ 缺 VC++ 运行库 {vc}（挂载外接盘 XTAP1T 或手动放置后重跑）")
     if os.path.exists(model_dir):
         for fn in ("model.onnx", "tokenizer.json"):
             fp = os.path.join(model_dir, fn)

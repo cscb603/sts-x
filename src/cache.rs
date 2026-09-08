@@ -297,7 +297,7 @@ fn current_version_int() -> u32 {
 /// directory. Otherwise the parent is a SHARED system cache root
 /// (`~/Library/Caches` on macOS, `~/.cache` on Linux) and scanning it would
 /// delete unrelated `vN` directories owned by other applications.
-fn gc_bases() -> Vec<PathBuf> {
+fn gc_scan_bases() -> Vec<PathBuf> {
     let root = cache_root();
     let mut bases = vec![root.clone()];
     if let Some(parent) = root.parent() {
@@ -316,7 +316,7 @@ fn gc_bases() -> Vec<PathBuf> {
 /// Delete every index version directory strictly OLDER than the active version.
 ///
 /// Scans `cache_root()` (current `.../sts-x/vN` layout) plus the legacy
-/// `.../sts-x/cache/vN` parent when applicable (see [`gc_bases`]), so upgrades
+/// `.../sts-x/cache/vN` parent when applicable (see [`gc_scan_bases`]), so upgrades
 /// from any era are reclaimed. Never deletes the active version or any
 /// directory outside sts-x's own cache. Returns the count removed.
 ///
@@ -328,7 +328,7 @@ pub fn gc_old_index_versions() -> usize {
         return 0; // defensive: unknown current version -> touch nothing
     }
     let mut removed = 0usize;
-    for base in gc_bases() {
+    for base in gc_scan_bases() {
         let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
         };
@@ -360,7 +360,7 @@ pub fn has_stale_index_versions() -> bool {
     if cur == 0 {
         return false;
     }
-    for base in gc_bases() {
+    for base in gc_scan_bases() {
         let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
         };
