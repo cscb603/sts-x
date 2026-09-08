@@ -8,6 +8,7 @@ pub mod embed;
 pub mod filesearch;
 pub mod gc;
 pub mod globsearch;
+pub mod guard;
 pub mod indexer;
 pub mod mcp;
 pub mod postprocess;

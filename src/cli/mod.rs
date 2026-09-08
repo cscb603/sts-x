@@ -196,6 +196,16 @@ pub enum Commands {
         #[arg(short = 'o', long)]
         index_path: Option<PathBuf>,
     },
+    /// List independent projects under a directory (AI discoverability: tells
+    /// the agent exactly which `path` to pass to `search`)
+    Projects {
+        /// Directory to scan (default: current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+        /// Max projects to list (default: 50)
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 pub async fn run(cli: &Cli) -> anyhow::Result<()> {
@@ -315,6 +325,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         Commands::Status { path, index_path } => {
             let p = resolve_path(path);
             cmd_status(&p, index_path.as_ref()).await
+        }
+        Commands::Projects { path, limit } => {
+            let p = resolve_path(path);
+            cmd_projects(&p, *limit)
         }
     }
 }
@@ -459,6 +473,44 @@ async fn ensure_indexed(config: &IndexConfig, semantic: bool) -> anyhow::Result<
     Ok(true)
 }
 
+/// 列出目录下的独立项目 —— AI 的"项目地图"。
+///
+/// 解决的可发现性问题：AI（或刚拿到 sts-x 的人）往往不知道该把 `path`
+/// 指向哪里。先调用它，再拿返回的 path 去 `search`，即可命中 AST/BM25 索引。
+fn cmd_projects(root: &Path, limit: usize) -> anyhow::Result<()> {
+    let kind = crate::guard::classify(root);
+    let projects = crate::guard::list_projects(root, limit);
+    let items: Vec<serde_json::Value> = projects
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "path": p.path.display().to_string(),
+                "marker": p.marker,
+            })
+        })
+        .collect();
+
+    let hint = match kind {
+        crate::guard::TargetKind::Container => {
+            "这是多项目容器：不要对它整体 search（会降级）。请把 -p 指向下列某个项目。"
+        }
+        crate::guard::TargetKind::Project => {
+            "这是单一项目（或 monorepo/workspace），可以直接作为 -p 目标建立索引。"
+        }
+    };
+
+    let out = serde_json::json!({
+        "root": root.display().to_string(),
+        "kind": if kind == crate::guard::TargetKind::Container { "container" } else { "project" },
+        "count": items.len(),
+        "hint": hint,
+        "projects": items,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 async fn cmd_index(
     project_root: &Path,
     output: &Option<PathBuf>,
@@ -516,6 +568,19 @@ async fn cmd_search(
 ) -> anyhow::Result<()> {
     let config = build_config(root, custom_index);
     let semantic = semantic_flag || crate::embed::semantic_requested();
+
+    // 索引单元护栏（src/guard.rs）：容器目录（多个独立项目的父目录）不建索引。
+    // 否则会像 AI 工作区根那样产生数万 block / 上百 MB 的巨型索引且频繁失效。
+    // 降级路径仍然给 AI 可用结果（零索引 rg 搜索）+ 候选项目，便于精确再搜。
+    if crate::guard::is_container(root) {
+        let value = crate::guard::degraded_search(query_str, root, top_k, filename_mode)?;
+        eprintln!(
+            "[sts-x] 检测到多项目容器：{} — 已降级为零索引文件搜索；传具体项目 path 可启用 AST/BM25",
+            root.display()
+        );
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
 
     if !filename_mode {
         ensure_indexed(&config, semantic).await?;

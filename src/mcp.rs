@@ -127,6 +127,15 @@ impl McpEngine {
         if q.path.is_none() {
             q.path = Some(self.root.clone());
         }
+
+        // 索引单元护栏（src/guard.rs）：容器目录不建索引，降级为零索引搜索
+        // + 候选项目。避免 AI 不传 path（默认工作区根）时触发分钟级重建。
+        let effective_root = q.path.clone().unwrap_or_else(|| self.root.clone());
+        if crate::guard::is_container(&effective_root) {
+            let k = if q.top_k == 0 { 2 } else { q.top_k };
+            return crate::guard::degraded_search(&q.query, &effective_root, k, false);
+        }
+
         // Apply output_mode routing like server handle_search: auto-route when absent.
         if q.output_mode.is_none() && matches!(q.mode, SearchMode::Code) {
             let decision = crate::router::classify(&q.query);
@@ -153,6 +162,43 @@ impl McpEngine {
             crate::postprocess::aggregate_results(&mut out);
             Ok(serde_json::to_value(out)?)
         }
+    }
+
+    /// 项目地图（可发现性）：告诉 AI 该把 `path` 指向哪个项目。
+    fn projects(&self, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let dir = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.root.clone());
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+        let kind = crate::guard::classify(&dir);
+        let projects = crate::guard::list_projects(&dir, limit);
+        let items: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name,
+                    "path": p.path.display().to_string(),
+                    "marker": p.marker,
+                })
+            })
+            .collect();
+        let hint = match kind {
+            crate::guard::TargetKind::Container => {
+                "这是多项目容器：不要直接 search 它（会降级为零索引搜索）。请把下列某个项目的 path 传给 search。"
+            }
+            crate::guard::TargetKind::Project => {
+                "这是单一项目（或 monorepo/workspace），可直接作为 search 的 path 建立索引。"
+            }
+        };
+        Ok(serde_json::json!({
+            "root": dir.display().to_string(),
+            "kind": if kind == crate::guard::TargetKind::Container { "container" } else { "project" },
+            "count": items.len(),
+            "hint": hint,
+            "projects": items,
+        }))
     }
 
     fn file(&self, args: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -305,6 +351,18 @@ fn tools_list() -> serde_json::Value {
                     },
                     "required": ["patterns"]
                 }
+            },
+            {
+                "name": "projects",
+                "description": "List independent projects under a directory (the project map). USE THIS FIRST when you don't know which `path` to search: it returns each project's name + absolute path. A directory holding many independent projects (a workspace root) is NOT indexed as one unit — searching it directly degrades to zero-index file search, so pick a project path from this list and pass it to `search`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Directory to scan (default: cwd)" },
+                        "limit": { "type": "integer", "description": "Max projects to list (default 50)", "default": 50 }
+                    },
+                    "required": []
+                }
             }
         ]
     })
@@ -399,6 +457,7 @@ pub fn run(default_root: &Path) -> anyhow::Result<()> {
                         "search" => eng.search(&args),
                         "file" => eng.file(&args),
                         "glob" => eng.glob(&args),
+                        "projects" => eng.projects(&args),
                         _ => anyhow::bail!("unknown tool: {name}"),
                     }
                 })();
@@ -441,7 +500,8 @@ mod tests {
         // MCP 协议字段必须 inputSchema（驼峰）—— WorkBuddy 严格校验
         let v = tools_list();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        // search / file / glob / projects
+        assert_eq!(tools.len(), 4);
         for t in tools {
             assert!(t.get("inputSchema").is_some(), "missing inputSchema: {t}");
             assert!(t.get("input_schema").is_none(), "must NOT be snake_case");

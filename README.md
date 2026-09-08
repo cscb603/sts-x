@@ -99,6 +99,11 @@ sts-x glob "*.toml,*.lock" -p /your-project          # 多模式逗号分隔
 sts-x glob "**/*.rs" -p /your-project --sort-recent  # 最近修改优先
 sts-x glob "src/**/*.rs" -p /your-project --git-aware # git 改动文件优先
 
+# 9. 项目地图：发现某目录下有哪些可索引项目（v3.3.3，专为 AI 设计）
+#    当传入目录是「多项目容器」(如 ~/Documents/AI) 而非单项目时，
+#    search/ai 会自动降级为 file 模式并附带候选项目清单，避免为巨型目录建索引。
+sts-x projects -p /your-workspace --limit 20
+
 ```
 
 ```powershell
@@ -152,6 +157,16 @@ STS-X 从架构设计之初就面向 AI，而非事后适配。
 
 - **高亮行标注**：`highlight_lines` 字段精确标注查询词在代码块中的行号，AI 可直接定位关键代码
 - **上下文控制**：通过 `--context N` 参数灵活控制返回行数，N=0 时返回完整代码块
+
+### 多项目容器智能降级（v3.3.3）
+
+索引单元应当是「仓库/项目」，而不是「你传给它的任意目录」。当传入目录是**多项目容器**（如 `~/Documents/AI` 这种含几十个独立项目的父目录）时，sts-x 不会为它建一个上百 MB 的巨型索引，而是自动降级：
+
+- `search` / `ai` 在容器目录上调用 → 自动改用 **file 模式**（rg 后端、秒出、零索引），并在 JSON 里附 `degraded: "container"` + `matched_projects`（命中结果实际落在哪些子项目里），AI 据此改传具体 `-p` 即可获得语义检索。
+- 真仓库（monorepo / workspace）不误伤：判定依据是**嵌套项目数量**（一级子目录里带 `Cargo.toml`/`package.json`/`.git` 等标记的数量），而非简单的「有没有 .git」——容器目录自身往往也有 .git，但内部有数十个独立项目，故仍判定为容器。
+- 新增 `sts-x projects -p <目录> [--limit N]`：列出该目录下所有可索引项目（根路径 + 标记类型 + 文件数），供 AI 在调用前先「看地图」。
+
+> 背景：早期版本在 `~/Documents/AI` 上建了 80107 代码块的 110MB 索引且常年 STALE，每次 AI 不传 path 就触发分钟级重建。3.3.3 从根上消除这类浪费。
 
 ---
 
